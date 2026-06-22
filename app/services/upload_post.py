@@ -32,6 +32,8 @@ class UploadPostService:
         platforms: Optional[list] = None,
         privacy_level: str = "PUBLIC_TO_EVERYONE",
         youtube_extra: Optional[dict] = None,
+        cover_image_path: Optional[str] = None,
+        is_short_form: bool = False,
     ) -> dict:
         if not self.is_configured():
             logger.warning("Upload-Post is not configured. Skipping cross-post.")
@@ -46,9 +48,10 @@ class UploadPostService:
 
         logger.info(f"Cross-posting video to {', '.join(platforms)} via Upload-Post...")
 
+        thumbnail_file = None
         try:
             with open(video_path, 'rb') as video_file:
-                files = {'video': video_file}
+                files = [('video', video_file)]
 
                 data = [
                     ('user', self.username),
@@ -68,6 +71,27 @@ class UploadPostService:
                         data.append(('tags[]', tag))
                     data.append(('privacyStatus', youtube_extra.get("privacyStatus", "public")))
                     data.append(('containsSyntheticMedia', "true"))
+                    youtube_thumbnail_path = str(
+                        youtube_extra.get("thumbnail_path", "") or ""
+                    ).strip()
+                    if youtube_thumbnail_path:
+                        if is_short_form:
+                            logger.info(
+                                "YouTube thumbnail upload is skipped for short-form videos"
+                            )
+                        elif os.path.exists(youtube_thumbnail_path):
+                            thumbnail_file = open(youtube_thumbnail_path, 'rb')
+                            files.append(('thumbnail', thumbnail_file))
+                        else:
+                            logger.warning(
+                                f"YouTube thumbnail not found, skipping: {youtube_thumbnail_path}"
+                            )
+
+                if "tiktok" in platforms:
+                    data.append(('cover_timestamp', str(
+                        youtube_extra.get("tiktok_cover_timestamp", 1000)
+                        if youtube_extra else 1000
+                    )))
 
                 headers = {'Authorization': f'Apikey {self.api_key}'}
 
@@ -92,6 +116,12 @@ class UploadPostService:
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to cross-post video: {str(e)}")
             return {"success": False, "error": str(e)}
+        finally:
+            if thumbnail_file is not None:
+                try:
+                    thumbnail_file.close()
+                except Exception:
+                    pass
 
     def check_status(self, request_id: str) -> dict:
         """
@@ -132,5 +162,14 @@ def cross_post_video(
     title: str,
     platforms: Optional[list] = None,
     youtube_extra: Optional[dict] = None,
+    cover_image_path: Optional[str] = None,
+    is_short_form: bool = False,
 ) -> dict:
-    return upload_post_service.upload_video(video_path, title, platforms, youtube_extra=youtube_extra)
+    return upload_post_service.upload_video(
+        video_path,
+        title,
+        platforms,
+        youtube_extra=youtube_extra,
+        cover_image_path=cover_image_path,
+        is_short_form=is_short_form,
+    )

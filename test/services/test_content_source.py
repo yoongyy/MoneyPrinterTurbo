@@ -13,6 +13,7 @@ class TestContentSourceService(unittest.TestCase):
             final_url="https://example.com/story?tracking=1",
             title="Example Story",
             content="Grounded article content.",
+            cover_image_url="https://example.com/cover.jpg",
         )
 
         with patch.object(
@@ -28,6 +29,7 @@ class TestContentSourceService(unittest.TestCase):
         self.assertEqual(result.extraction_method, "article")
         self.assertEqual(result.title, "Example Story")
         self.assertEqual(result.final_url, "https://example.com/story")
+        self.assertEqual(result.cover_image_url, "https://example.com/cover.jpg")
 
     def test_media_url_must_match_selected_platform(self):
         with self.assertRaisesRegex(ValueError, "valid youtube URL"):
@@ -85,6 +87,19 @@ This is the transcript.
 
         self.assertEqual(options["proxy"], "http://proxy.local:8080")
 
+    def test_pick_thumbnail_url_prefers_best_available_image(self):
+        info = {
+            "thumbnails": [
+                {"url": "https://example.com/1.jpg", "width": 320, "height": 180},
+                {"url": "https://example.com/2.jpg", "width": 1280, "height": 720},
+            ]
+        }
+
+        self.assertEqual(
+            content_source._pick_thumbnail_url(info),
+            "https://example.com/2.jpg",
+        )
+
     @patch.object(content_source.subtitle, "transcribe_text")
     @patch.object(content_source, "_transcribe_audio_with_gemini", return_value="")
     @patch.object(content_source, "_download_audio")
@@ -102,6 +117,7 @@ This is the transcript.
             "title": "Video title",
             "webpage_url": "https://www.youtube.com/watch?v=abc",
             "duration": 30,
+            "thumbnail": "https://example.com/thumb.jpg",
         }
 
         def create_audio(_url, work_dir):
@@ -118,6 +134,7 @@ This is the transcript.
 
         self.assertEqual(result.extraction_method, "speech-to-text")
         self.assertEqual(result.title, "Video title")
+        self.assertEqual(result.cover_image_url, "https://example.com/thumb.jpg")
         transcribe_audio_with_gemini.assert_called_once()
         transcribe_text.assert_called_once()
 

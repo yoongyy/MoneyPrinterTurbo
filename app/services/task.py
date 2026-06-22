@@ -8,9 +8,10 @@ from pydub import AudioSegment
 
 from app.config import config
 from app.models import const
-from app.models.schema import VideoConcatMode, VideoParams
+from app.models.schema import VideoAspect, VideoConcatMode, VideoParams
 from app.services import (
     content_source,
+    cover,
     dialogue,
     llm,
     material,
@@ -70,6 +71,8 @@ def generate_script(task_id, params):
             source_title = resolved_source.title
             source_url = resolved_source.final_url
             params.source_url = source_url
+            params.source_title = source_title
+            params.source_cover_image_url = resolved_source.cover_image_url
             if not params.video_subject:
                 params.video_subject = source_title or source_url
 
@@ -649,6 +652,23 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         f"task {task_id} finished, generated {len(final_video_paths)} videos."
     )
 
+    cover_image_path = ""
+    cover_title = cover.clean_cover_title(
+        getattr(params, "source_title", "") or params.video_subject
+    )
+    if getattr(params, "generate_video_cover", True):
+        cover_source_image = getattr(params, "source_cover_image_url", "") or ""
+        if cover_source_image:
+            cover_image_path = cover.generate_video_cover(
+                source_image_ref=cover_source_image,
+                title=cover_title or params.video_subject,
+                output_file=path.join(utils.task_dir(task_id), "cover.jpg"),
+                video_aspect=params.video_aspect,
+                font_name=params.font_name,
+            )
+        else:
+            logger.warning("no source image available; skipping generated cover")
+
     # 7. Cross-post to social platforms (if enabled)
     cross_post_results = []
     if (
@@ -672,13 +692,20 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
                 "tags": metadata.get("hashtags", []),
                 "privacyStatus": upload_post.upload_post_service.youtube_privacy_status,
                 "containsSyntheticMedia": True,
+                "thumbnail_path": cover_image_path,
+                "tiktok_cover_timestamp": 1000,
             }
+
+        upload_title = cover_title or params.video_subject or "Check out this video! #shorts #viral"
+        is_short_form = str(getattr(params.video_aspect, "value", params.video_aspect)) == VideoAspect.portrait.value
 
         for video_path in final_video_paths:
             result = upload_post.cross_post_video(
                 video_path=video_path,
-                title=params.video_subject or "Check out this video! #shorts #viral",
+                title=upload_title,
                 youtube_extra=youtube_extra,
+                cover_image_path=cover_image_path,
+                is_short_form=is_short_form,
             )
             cross_post_results.append(result)
             if result.get("success"):
@@ -697,6 +724,7 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         "audio_duration": audio_duration,
         "subtitle_path": subtitle_path,
         "materials": downloaded_videos,
+        "cover_image": cover_image_path or None,
         "cross_post_results": cross_post_results if cross_post_results else None,
     }
     sm.state.update_task(

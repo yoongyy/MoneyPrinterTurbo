@@ -1075,6 +1075,13 @@ with middle_panel:
             )
             config.app["match_materials_to_script"] = params.match_materials_to_script
 
+            params.generate_video_cover = st.checkbox(
+                tr("Generate Video Cover"),
+                value=bool(getattr(params, "generate_video_cover", True)),
+                help=tr("Generate Video Cover Help"),
+                key="generate_video_cover",
+            )
+
             video_codec_options = [
                 ("libx264 (CPU)", "libx264"),
                 ("NVIDIA NVENC (h264_nvenc)", "h264_nvenc"),
@@ -1748,6 +1755,9 @@ if start_button:
             player_cols = st.columns(len(video_files) * 2 + 1)
             for i, url in enumerate(video_files):
                 player_cols[i * 2 + 1].video(url)
+        cover_image = result.get("cover_image")
+        if cover_image:
+            st.image(cover_image, caption=tr("Generated Video Cover"))
     except Exception:
         pass
 

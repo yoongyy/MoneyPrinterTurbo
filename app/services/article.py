@@ -25,6 +25,7 @@ class ArticleContent:
     final_url: str
     title: str
     content: str
+    cover_image_url: str = ""
 
 
 class _ArticleHTMLParser(HTMLParser):
@@ -62,6 +63,7 @@ class _ArticleHTMLParser(HTMLParser):
         self._general_fragments: list[str] = []
         self._preferred_fragments: list[str] = []
         self._meta_title = ""
+        self._meta_image = ""
 
     def handle_starttag(self, tag: str, attrs):
         tag = tag.lower()
@@ -81,6 +83,10 @@ class _ArticleHTMLParser(HTMLParser):
             values = {str(key).lower(): str(value) for key, value in attrs if value}
             if values.get("property", "").lower() in {"og:title", "twitter:title"}:
                 self._meta_title = values.get("content", "").strip()
+            if values.get("property", "").lower() in {"og:image", "twitter:image", "twitter:image:src"}:
+                self._meta_image = values.get("content", "").strip()
+            if values.get("name", "").lower() in {"twitter:image", "twitter:image:src"}:
+                self._meta_image = values.get("content", "").strip()
 
     def handle_startendtag(self, tag: str, attrs):
         self.handle_starttag(tag, attrs)
@@ -131,15 +137,15 @@ class _ArticleHTMLParser(HTMLParser):
             paragraphs.append(line)
         return "\n\n".join(paragraphs)
 
-    def result(self) -> tuple[str, str]:
+    def result(self) -> tuple[str, str, str]:
         title = self._meta_title or " ".join(self._title_fragments).strip()
         preferred = self._clean_fragments(self._preferred_fragments)
         general = self._clean_fragments(self._general_fragments)
         content = preferred if len(preferred) >= MIN_USEFUL_CONTENT_CHARACTERS else general
-        return title, content
+        return title, content, self._meta_image.strip()
 
 
-def extract_article_text(html_content: str) -> tuple[str, str]:
+def extract_article_text(html_content: str) -> tuple[str, str, str]:
     parser = _ArticleHTMLParser()
     parser.feed(html_content)
     parser.close()
@@ -264,9 +270,9 @@ def fetch_url_content(url: str) -> ArticleContent:
     final_url, content_type, raw = _fetch_text(source_url)
 
     if "html" in content_type or "xml" in content_type or "<html" in raw[:500].lower():
-        title, content = extract_article_text(raw)
+        title, content, cover_image_url = extract_article_text(raw)
     else:
-        title, content = "", raw.strip()
+        title, content, cover_image_url = "", raw.strip(), ""
 
     if (
         len(content) < MIN_USEFUL_CONTENT_CHARACTERS
@@ -283,9 +289,13 @@ def fetch_url_content(url: str) -> ArticleContent:
     if len(content) < 80:
         raise ValueError("article URL did not contain enough readable content")
 
+    if cover_image_url:
+        cover_image_url = urljoin(final_url, cover_image_url)
+
     return ArticleContent(
         source_url=source_url,
         final_url=final_url,
         title=title.strip(),
         content=content,
+        cover_image_url=cover_image_url,
     )

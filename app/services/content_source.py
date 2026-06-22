@@ -72,6 +72,7 @@ class SourceContent:
     title: str
     content: str
     extraction_method: str
+    cover_image_url: str = ""
 
 
 class _YTDLPLogger:
@@ -339,6 +340,30 @@ def _extract_media_info(url: str, work_dir: Path) -> dict:
             )
 
     return info
+
+
+def _pick_thumbnail_url(info: dict) -> str:
+    for key in ("thumbnail", "thumbnail_url"):
+        candidate = str(info.get(key, "") or "").strip()
+        if candidate:
+            return candidate
+
+    thumbnails = info.get("thumbnails") or []
+    best_url = ""
+    best_area = -1
+    for item in thumbnails:
+        if not isinstance(item, dict):
+            continue
+        candidate = str(item.get("url", "") or "").strip()
+        if not candidate:
+            continue
+        width = int(item.get("width") or 0)
+        height = int(item.get("height") or 0)
+        area = width * height
+        if area > best_area:
+            best_area = area
+            best_url = candidate
+    return best_url
 
 
 def _preferred_caption_language(info: dict, captions: dict) -> str:
@@ -636,6 +661,7 @@ def _fetch_media_content(source_type: str, url: str) -> SourceContent:
         title=str(info.get("title") or "").strip(),
         content=transcript,
         extraction_method=extraction_method,
+        cover_image_url=_pick_thumbnail_url(info),
     )
 
 
@@ -650,5 +676,6 @@ def fetch_source_content(source_type: str, url: str) -> SourceContent:
             title=result.title,
             content=result.content,
             extraction_method="article",
+            cover_image_url=result.cover_image_url,
         )
     return _fetch_media_content(source_type, url)
