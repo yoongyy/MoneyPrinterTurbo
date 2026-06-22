@@ -18,12 +18,13 @@ if root_dir not in sys.path:
 from app.config import config
 from app.models.schema import (
     MaterialInfo,
+    ScriptStyle,
     VideoAspect,
     VideoConcatMode,
     VideoParams,
     VideoTransitionMode,
 )
-from app.services import llm, voice
+from app.services import article, content_source, dialogue, llm, voice
 from app.services import task as tm
 from app.utils import utils
 
@@ -61,6 +62,10 @@ system_locale = utils.get_system_locale()
 
 if "video_subject" not in st.session_state:
     st.session_state["video_subject"] = ""
+if "source_url" not in st.session_state:
+    st.session_state["source_url"] = ""
+if "source_type" not in st.session_state:
+    st.session_state["source_type"] = content_source.SOURCE_ARTICLE
 if "video_script" not in st.session_state:
     st.session_state["video_script"] = ""
 if "video_terms" not in st.session_state:
@@ -222,12 +227,73 @@ def tr(key):
     loc = locales.get(st.session_state["ui_language"], {})
     return loc.get("Translation", {}).get(key, key)
 
+
+def generate_script_from_source_url():
+    """Populate the subject and script fields from the selected source URL."""
+    source_type = st.session_state.get("source_type", content_source.SOURCE_ARTICLE)
+    source_url = st.session_state.get("source_url", "").strip()
+    st.session_state["article_url_generation_error"] = ""
+    st.session_state["article_url_generation_success"] = False
+    if not source_url:
+        st.session_state["article_url_generation_error"] = tr(
+            "Please Enter a Source URL"
+        )
+        return
+
+    try:
+        resolved_source = content_source.fetch_source_content(source_type, source_url)
+        resolved_source_url = resolved_source.final_url
+        subject = resolved_source.title or resolved_source_url
+
+        style_values = [
+            ScriptStyle.narration,
+            ScriptStyle.podcast,
+            ScriptStyle.talkshow,
+            ScriptStyle.crosstalk,
+        ]
+        style_index = st.session_state.get("script_style_input", 0)
+        language_index = st.session_state.get("video_language_input", 0)
+        language = support_locales[language_index - 1] if language_index > 0 else ""
+        custom_system_prompt = ""
+        if st.session_state.get("use_custom_system_prompt", False):
+            custom_system_prompt = st.session_state.get(
+                "custom_system_prompt", ""
+            ).strip()
+
+        script = llm.generate_script(
+            video_subject=subject,
+            language=language,
+            video_duration_minutes=int(
+                st.session_state.get("video_duration_minutes_input", 1) or 1
+            ),
+            paragraph_number=st.session_state.get("paragraph_number_input", 1),
+            video_script_prompt=st.session_state.get("video_script_prompt", "").strip(),
+            custom_system_prompt=custom_system_prompt,
+            script_style=style_values[style_index],
+            source_content=resolved_source.content,
+            source_title=resolved_source.title,
+            source_url=resolved_source_url,
+        )
+        if "Error: " in script:
+            raise RuntimeError(tr(script))
+
+        st.session_state["video_subject"] = subject
+        st.session_state["video_script"] = script
+        st.session_state["source_url"] = resolved_source_url
+        st.session_state["source_extraction_method"] = resolved_source.extraction_method
+        st.session_state["article_url_generation_success"] = True
+    except Exception as exc:
+        st.session_state["article_url_generation_error"] = str(exc)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_groq_model_ids(api_key: str, base_url: str) -> list[str]:
     if not api_key:
         return []
 
-    normalized_base_url = (base_url or "https://api.groq.com/openai/v1").strip().rstrip("/")
+    normalized_base_url = (
+        (base_url or "https://api.groq.com/openai/v1").strip().rstrip("/")
+    )
     models_url = f"{normalized_base_url}/models"
 
     try:
@@ -251,6 +317,7 @@ def get_groq_model_ids(api_key: str, base_url: str) -> list[str]:
     except Exception as e:
         logger.warning(f"failed to fetch groq models: {e}")
         return []
+
 
 # 创建基础设置折叠框
 if not config.app.get("hide_config", False):
@@ -695,10 +762,75 @@ uploaded_audio_file = None
 with left_panel:
     with st.container(border=True):
         st.write(tr("Video Script Settings"))
+        source_labels = {
+            content_source.SOURCE_ARTICLE: tr("Source Article"),
+            content_source.SOURCE_YOUTUBE: tr("Source YouTube"),
+            content_source.SOURCE_TIKTOK: tr("Source TikTok"),
+        }
+        params.source_type = st.selectbox(
+            tr("Source Type"),
+            options=list(source_labels),
+            format_func=lambda value: source_labels[value],
+            key="source_type",
+        )
+        params.source_url = st.text_input(
+            tr("Source URL"),
+            placeholder=tr("Source URL Placeholder"),
+            key="source_url",
+        ).strip()
+        if params.source_type != content_source.SOURCE_ARTICLE:
+            st.caption(tr("Media Source Help"))
+        st.button(
+            tr("Generate Subject and Script from Source"),
+            key="generate_script_from_source_url",
+            on_click=generate_script_from_source_url,
+            use_container_width=True,
+        )
+        if st.session_state.get("article_url_generation_error"):
+            st.error(st.session_state["article_url_generation_error"])
+        elif st.session_state.get("article_url_generation_success"):
+            st.success(tr("Subject and Script Generated"))
+
         params.video_subject = st.text_input(
             tr("Video Subject"),
             key="video_subject",
         ).strip()
+
+        duration_options = [1, 2, 3, 5]
+        duration_labels = {
+            1: tr("1 Minute"),
+            2: tr("2 Minutes"),
+            3: tr("3 Minutes"),
+            5: tr("5 Minutes"),
+        }
+        saved_duration_minutes = int(
+            st.session_state.get("video_duration_minutes_input", 1) or 1
+        )
+        if saved_duration_minutes not in duration_options:
+            saved_duration_minutes = 1
+        saved_duration_index = duration_options.index(saved_duration_minutes)
+        params.video_duration_minutes = st.selectbox(
+            tr("Target Video Duration"),
+            options=duration_options,
+            format_func=lambda x: duration_labels[x],
+            index=saved_duration_index,
+            key="video_duration_minutes_input",
+        )
+
+        script_styles = [
+            (tr("Narration"), ScriptStyle.narration),
+            (tr("Podcast"), ScriptStyle.podcast),
+            (tr("Talk Show"), ScriptStyle.talkshow),
+            (tr("Crosstalk"), ScriptStyle.crosstalk),
+        ]
+        selected_script_style = st.selectbox(
+            tr("Script Style"),
+            options=range(len(script_styles)),
+            format_func=lambda x: script_styles[x][0],
+            index=0,
+            key="script_style_input",
+        )
+        params.script_style = script_styles[selected_script_style][1]
 
         video_languages = [
             (tr("Auto Detect"), ""),
@@ -715,6 +847,7 @@ with left_panel:
             format_func=lambda x: video_languages[x][
                 0
             ],  # The label is displayed to the user
+            key="video_language_input",
         )
         params.video_language = video_languages[selected_index][1]
 
@@ -755,19 +888,43 @@ with left_panel:
             tr("Generate Video Script and Keywords"), key="auto_generate_script"
         ):
             with st.spinner(tr("Generating Video Script and Keywords")):
-                script = llm.generate_script(
-                    video_subject=params.video_subject,
-                    language=params.video_language,
-                    paragraph_number=params.paragraph_number,
-                    video_script_prompt=params.video_script_prompt,
-                    custom_system_prompt=params.custom_system_prompt,
-                )
-                terms = llm.generate_terms(
-                    params.video_subject,
-                    script,
-                    amount=8 if params.match_materials_to_script else 5,
-                    match_script_order=params.match_materials_to_script,
-                )
+                try:
+                    source_content = ""
+                    source_title = ""
+                    resolved_source_url = params.source_url
+                    effective_subject = params.video_subject
+                    if params.source_url:
+                        resolved_source = content_source.fetch_source_content(
+                            params.source_type, params.source_url
+                        )
+                        source_content = resolved_source.content
+                        source_title = resolved_source.title
+                        resolved_source_url = resolved_source.final_url
+                        effective_subject = (
+                            effective_subject or source_title or resolved_source_url
+                        )
+
+                    script = llm.generate_script(
+                        video_subject=effective_subject,
+                        language=params.video_language,
+                        video_duration_minutes=params.video_duration_minutes,
+                        paragraph_number=params.paragraph_number,
+                        video_script_prompt=params.video_script_prompt,
+                        custom_system_prompt=params.custom_system_prompt,
+                        script_style=params.script_style,
+                        source_content=source_content,
+                        source_title=source_title,
+                        source_url=resolved_source_url,
+                    )
+                    terms = llm.generate_terms(
+                        effective_subject,
+                        dialogue.strip_speaker_labels(script, params.script_style),
+                        amount=8 if params.match_materials_to_script else 5,
+                        match_script_order=params.match_materials_to_script,
+                    )
+                except Exception as exc:
+                    st.error(str(exc))
+                    st.stop()
                 if "Error: " in script:
                     st.error(tr(script))
                 elif "Error: " in terms:
@@ -776,7 +933,7 @@ with left_panel:
                     st.session_state["video_script"] = script
                     st.session_state["video_terms"] = ", ".join(terms)
         params.video_script = st.text_area(
-            tr("Video Script"), value=st.session_state["video_script"], height=280
+            tr("Video Script"), key="video_script", height=280
         )
         if st.button(tr("Generate Video Keywords"), key="auto_generate_terms"):
             if not params.video_script:
@@ -786,7 +943,9 @@ with left_panel:
             with st.spinner(tr("Generating Video Keywords")):
                 terms = llm.generate_terms(
                     params.video_subject,
-                    params.video_script,
+                    dialogue.strip_speaker_labels(
+                        params.video_script, params.script_style
+                    ),
                     amount=8 if params.match_materials_to_script else 5,
                     match_script_order=params.match_materials_to_script,
                 )
@@ -835,7 +994,8 @@ with middle_panel:
             local_file_types = ["mp4", "mov", "avi", "flv", "mkv", "jpg", "jpeg", "png"]
             uploaded_files = st.file_uploader(
                 tr("Upload Local Files"),
-                type=local_file_types + [file_type.upper() for file_type in local_file_types],
+                type=local_file_types
+                + [file_type.upper() for file_type in local_file_types],
                 accept_multiple_files=True,
             )
 
@@ -1025,6 +1185,7 @@ with middle_panel:
         if saved_voice_name_index >= len(friendly_names) and friendly_names:
             saved_voice_name_index = 0
 
+        voice_name = ""
         # 确保有声音可选
         if friendly_names:
             selected_friendly_name = st.selectbox(
@@ -1040,6 +1201,35 @@ with middle_panel:
             ]
             params.voice_name = voice_name
             config.ui["voice_name"] = voice_name
+
+            if dialogue.is_dialogue_style(params.script_style):
+                voice_values = list(friendly_names.keys())
+                saved_voice_name_2 = config.ui.get("voice_name_2", "")
+                if saved_voice_name_2 in voice_values:
+                    saved_voice_name_2_index = voice_values.index(saved_voice_name_2)
+                elif len(voice_values) > 1:
+                    saved_voice_name_2_index = 1 if voice_values[0] == voice_name else 0
+                else:
+                    saved_voice_name_2_index = 0
+                selected_friendly_name_2 = st.selectbox(
+                    tr("Secondary Speech Synthesis"),
+                    options=[friendly_names[value] for value in voice_values],
+                    index=saved_voice_name_2_index,
+                    key="secondary_voice_selector",
+                )
+                params.voice_name_2 = voice_values[
+                    [friendly_names[value] for value in voice_values].index(
+                        selected_friendly_name_2
+                    )
+                ]
+                config.ui["voice_name_2"] = params.voice_name_2
+                params.dialogue_pause = st.selectbox(
+                    tr("Dialogue Pause"),
+                    options=[0.0, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0],
+                    index=2,
+                )
+            else:
+                params.voice_name_2 = voice_name
         else:
             # 如果没有声音可选，显示提示信息
             st.warning(
@@ -1337,11 +1527,13 @@ with right_panel:
     with st.expander(tr("Click to show API Key management"), expanded=False):
         st.subheader(tr("Manage Pexels, Pixabay and Coverr API Keys"))
 
-        col1, col2, col3 = st.tabs([
-            tr("Pexels API Keys"),
-            tr("Pixabay API Keys"),
-            tr("Coverr API Keys"),
-        ])
+        col1, col2, col3 = st.tabs(
+            [
+                tr("Pexels API Keys"),
+                tr("Pixabay API Keys"),
+                tr("Coverr API Keys"),
+            ]
+        )
 
         with col1:
             st.subheader(tr("Pexels API Keys"))
@@ -1365,7 +1557,9 @@ with right_panel:
 
             if config.app["pexels_api_keys"]:
                 delete_key = st.selectbox(
-                    tr("Select Pexels API Key to delete"), config.app["pexels_api_keys"], key="pexels_delete_key"
+                    tr("Select Pexels API Key to delete"),
+                    config.app["pexels_api_keys"],
+                    key="pexels_delete_key",
                 )
                 if st.button(tr("Delete Selected Pexels API Key")):
                     config.app["pexels_api_keys"].remove(delete_key)
@@ -1395,7 +1589,9 @@ with right_panel:
 
             if config.app["pixabay_api_keys"]:
                 delete_key = st.selectbox(
-                    tr("Select Pixabay API Key to delete"), config.app["pixabay_api_keys"], key="pixabay_delete_key"
+                    tr("Select Pixabay API Key to delete"),
+                    config.app["pixabay_api_keys"],
+                    key="pixabay_delete_key",
                 )
                 if st.button(tr("Delete Selected Pixabay API Key")):
                     config.app["pixabay_api_keys"].remove(delete_key)
@@ -1408,7 +1604,10 @@ with right_panel:
             # 与 pexels/pixabay 不同,coverr_api_keys 是 PR 新增配置项,
             # 老用户的 config.toml 不一定包含,这里先兜底初始化为空列表,
             # 防止下面 .append / 索引访问触发 KeyError。
-            if "coverr_api_keys" not in config.app or config.app["coverr_api_keys"] is None:
+            if (
+                "coverr_api_keys" not in config.app
+                or config.app["coverr_api_keys"] is None
+            ):
                 config.app["coverr_api_keys"] = []
 
             if config.app["coverr_api_keys"]:
@@ -1431,7 +1630,9 @@ with right_panel:
 
             if config.app["coverr_api_keys"]:
                 delete_key = st.selectbox(
-                    tr("Select Coverr API Key to delete"), config.app["coverr_api_keys"], key="coverr_delete_key"
+                    tr("Select Coverr API Key to delete"),
+                    config.app["coverr_api_keys"],
+                    key="coverr_delete_key",
                 )
                 if st.button(tr("Delete Selected Coverr API Key")):
                     config.app["coverr_api_keys"].remove(delete_key)
@@ -1442,7 +1643,7 @@ start_button = st.button(tr("Generate Video"), use_container_width=True, type="p
 if start_button:
     config.save_config()
     task_id = str(uuid4())
-    if not params.video_subject and not params.video_script:
+    if not params.video_subject and not params.video_script and not params.source_url:
         st.error(tr("Video Script and Subject Cannot Both Be Empty"))
         scroll_to_bottom()
         st.stop()
@@ -1525,7 +1726,12 @@ if start_button:
 
     st.toast(tr("Generating Video"))
     logger.info(tr("Start Generating Video"))
-    logger.info(utils.to_json(params))
+    params_for_log = params.model_dump()
+    if params_for_log.get("source_url"):
+        params_for_log["source_url"] = article.safe_display_url(
+            params_for_log["source_url"]
+        )
+    logger.info(utils.to_json(params_for_log))
     scroll_to_bottom()
 
     result = tm.start(task_id=task_id, params=params)

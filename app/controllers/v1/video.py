@@ -29,6 +29,7 @@ from app.models.schema import (
     VideoMaterialUploadResponse,
     VideoMaterialRetrieveResponse
 )
+from app.services import article
 from app.services import state as sm
 from app.services import task as tm
 from app.utils import file_security, utils
@@ -141,6 +142,16 @@ def create_task(
     task_id = utils.get_uuid()
     request_id = base.get_task_id(request)
     try:
+        if isinstance(body, TaskVideoRequest) and not any(
+            (
+                body.video_subject.strip(),
+                body.video_script.strip(),
+                body.source_url.strip(),
+            )
+        ):
+            raise ValueError(
+                "video_subject, video_script, and source_url cannot all be empty"
+            )
         task = {
             "task_id": task_id,
             "request_id": request_id,
@@ -148,7 +159,13 @@ def create_task(
         }
         sm.state.update_task(task_id)
         task_manager.add_task(tm.start, task_id=task_id, params=body, stop_at=stop_at)
-        logger.success(f"Task created: {utils.to_json(task)}")
+        log_task = dict(task)
+        log_task["params"] = dict(task["params"])
+        if log_task["params"].get("source_url"):
+            log_task["params"]["source_url"] = article.safe_display_url(
+                log_task["params"]["source_url"]
+            )
+        logger.success(f"Task created: {utils.to_json(log_task)}")
         return utils.get_response(200, task)
     except TaskQueueFullError as e:
         sm.state.delete_task(task_id)
@@ -382,7 +399,7 @@ async def download_video(request: Request, file_path: str):
     """
     download video
     :param request: Request request
-    :param file_path: video file path, eg: /cd1727ed-3473-42a2-a7da-4faafafec72b/final-1.mp4
+    :param file_path: video file path, eg: /cd1727ed-3473-42a2-a7da-4faafafec72b/My-Subject.mp4
     :return: video file
     """
     request_id = base.get_task_id(request)

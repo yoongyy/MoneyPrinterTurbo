@@ -20,10 +20,11 @@ RUN_INTEGRATION_TESTS = os.environ.get("MPT_RUN_INTEGRATION_TESTS", "").lower() 
     "yes",
 }
 
+
 class TestTaskService(unittest.TestCase):
     def setUp(self):
         pass
-    
+
     def tearDown(self):
         pass
 
@@ -41,16 +42,87 @@ class TestTaskService(unittest.TestCase):
             custom_system_prompt="Only write short narration.",
         )
 
-        with patch.object(tm.llm, "generate_script", return_value="生成的文案") as generate:
+        with patch.object(
+            tm.llm, "generate_script", return_value="生成的文案"
+        ) as generate:
             result = tm.generate_script("task-id", params)
 
         self.assertEqual(result, "生成的文案")
         generate.assert_called_once_with(
             video_subject="咖啡",
             language="zh-CN",
+            video_duration_minutes=1,
             paragraph_number=2,
             video_script_prompt="语气轻松",
             custom_system_prompt="Only write short narration.",
+        )
+
+    def test_subject_video_filename(self):
+        self.assertEqual(
+            tm.subject_video_filename("My Video Subject"), "My Video Subject.mp4"
+        )
+        self.assertEqual(
+            tm.subject_video_filename("News: AI / 2026", index=2, total=3),
+            "News- AI - 2026-2.mp4",
+        )
+        self.assertEqual(tm.subject_video_filename("../"), "video.mp4")
+        self.assertEqual(tm.subject_video_filename("CON"), "_CON.mp4")
+
+    def test_generate_final_video_uses_subject_filename(self):
+        params = VideoParams(video_subject="Example Subject", video_count=1)
+        with (
+            patch.object(tm.utils, "task_dir", return_value="/tmp/task-id"),
+            patch.object(tm.video, "combine_videos"),
+            patch.object(tm.video, "generate_video") as generate_video,
+            patch.object(tm.sm.state, "update_task"),
+        ):
+            final_paths, _ = tm.generate_final_videos(
+                "task-id", params, ["clip.mp4"], "audio.mp3", "subtitle.srt"
+            )
+
+        expected = "/tmp/task-id/Example Subject.mp4"
+        self.assertEqual(final_paths, [expected])
+        self.assertEqual(generate_video.call_args.kwargs["output_file"], expected)
+
+    def test_generate_script_fetches_url_content_and_derives_subject(self):
+        params = VideoParams(
+            source_url="https://example.com/story",
+            script_style="podcast",
+            video_subject="",
+        )
+        source_content = tm.content_source.SourceContent(
+            source_type="article",
+            source_url=params.source_url,
+            final_url=params.source_url,
+            title="Example Story",
+            content="Grounded article content.",
+            extraction_method="article",
+        )
+
+        with (
+            patch.object(
+                tm.content_source, "fetch_source_content", return_value=source_content
+            ) as fetch_source,
+            patch.object(
+                tm.llm, "generate_script", return_value="[Host] A\n[Guest] B"
+            ) as generate,
+        ):
+            result = tm.generate_script("task-id", params)
+
+        self.assertEqual(result, "[Host] A\n[Guest] B")
+        self.assertEqual(params.video_subject, "Example Story")
+        fetch_source.assert_called_once_with(params.source_type, params.source_url)
+        generate.assert_called_once_with(
+            video_subject="Example Story",
+            language="",
+            video_duration_minutes=1,
+            paragraph_number=1,
+            video_script_prompt="",
+            custom_system_prompt="",
+            script_style=params.script_style,
+            source_content="Grounded article content.",
+            source_title="Example Story",
+            source_url="https://example.com/story",
         )
 
     def test_generate_terms_uses_script_order_mode_when_enabled(self):
@@ -64,7 +136,9 @@ class TestTaskService(unittest.TestCase):
             match_materials_to_script=True,
         )
 
-        with patch.object(tm.llm, "generate_terms", return_value=["city", "train"]) as generate:
+        with patch.object(
+            tm.llm, "generate_terms", return_value=["city", "train"]
+        ) as generate:
             result = tm.generate_terms("task-id", params, "先城市，再地铁")
 
         self.assertEqual(result, ["city", "train"])
@@ -74,7 +148,7 @@ class TestTaskService(unittest.TestCase):
             amount=8,
             match_script_order=True,
         )
-    
+
     def test_generate_audio_uses_custom_file_inside_task_directory(self):
         task_id = "test-custom-audio-safe"
         task_dir = utils.task_dir(task_id)
@@ -169,13 +243,15 @@ class TestTaskService(unittest.TestCase):
     )
     def test_task_local_materials(self):
         task_id = "00000000-0000-0000-0000-000000000000"
-        video_materials=[]
+        video_materials = []
         for i in range(1, 4):
-            video_materials.append(MaterialInfo(
-                provider="local",
-                url=os.path.join(resources_dir, f"{i}.png"),
-                duration=0
-            ))
+            video_materials.append(
+                MaterialInfo(
+                    provider="local",
+                    url=os.path.join(resources_dir, f"{i}.png"),
+                    duration=0,
+                )
+            )
 
         params = VideoParams(
             video_subject="金钱的作用",
@@ -205,11 +281,11 @@ class TestTaskService(unittest.TestCase):
             stroke_color="#000000",
             stroke_width=1.5,
             n_threads=2,
-            paragraph_number=1
+            paragraph_number=1,
         )
         result = tm.start(task_id=task_id, params=params)
         print(result)
-    
+
 
 if __name__ == "__main__":
     unittest.main()

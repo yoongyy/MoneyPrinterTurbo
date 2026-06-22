@@ -83,7 +83,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="MoneyPrinterTurbo command line video generation"
     )
-    parser.add_argument("--video-subject", required=True, help="video subject")
+    parser.add_argument("--video-subject", default="", help="video subject")
+    parser.add_argument(
+        "--source-url",
+        default="",
+        help="article, YouTube, or TikTok URL used for script generation",
+    )
+    parser.add_argument(
+        "--source-type",
+        choices=["article", "youtube", "tiktok"],
+        default="article",
+        help="type of content provided by --source-url",
+    )
+    parser.add_argument(
+        "--script-style",
+        choices=["narration", "podcast", "talkshow", "crosstalk"],
+        default="narration",
+        help="generated script format",
+    )
     parser.add_argument("--video-script", default="", help="custom script")
     parser.add_argument("--video-terms", default=None, help="comma-separated terms")
     parser.add_argument(
@@ -154,6 +171,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="match generated/search materials to script order",
     )
     parser.add_argument("--voice-name", default="", help="tts voice name")
+    parser.add_argument(
+        "--secondary-voice-name",
+        default="",
+        help="second TTS voice used by dialogue script styles",
+    )
+    parser.add_argument(
+        "--dialogue-pause",
+        type=_non_negative_float,
+        default=0.2,
+        help="pause between dialogue turns in seconds",
+    )
     parser.add_argument(
         "--voice-volume",
         type=_non_negative_float,
@@ -250,6 +278,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "(search terms are not generated for local sources)"
         )
 
+    if not (args.video_subject or args.video_script or args.source_url):
+        parser.error(
+            "one of --video-subject, --video-script, or --source-url is required"
+        )
+
     return args
 
 
@@ -270,6 +303,9 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
 
     params_kwargs = {
         "video_subject": args.video_subject,
+        "source_type": args.source_type,
+        "source_url": args.source_url,
+        "script_style": args.script_style,
         "video_script": args.video_script,
         "video_terms": video_terms,
         "video_source": args.video_source,
@@ -277,6 +313,8 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "video_count": args.video_count,
         "video_aspect": args.video_aspect,
         "voice_name": args.voice_name,
+        "voice_name_2": args.secondary_voice_name,
+        "dialogue_pause": args.dialogue_pause,
         "subtitle_enabled": args.subtitle_enabled,
     }
 

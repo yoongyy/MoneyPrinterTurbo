@@ -9,6 +9,14 @@ root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__fi
 config_file = f"{root_dir}/config.toml"
 _CONTAINER_CGROUP_MARKERS = ("docker", "containerd", "kubepods", "libpod", "podman")
 _DOCKER_HOST_GATEWAY_NAME = "host.docker.internal"
+_UPLOAD_POST_KEYS = (
+    "upload_post_enabled",
+    "upload_post_api_key",
+    "upload_post_username",
+    "upload_post_platforms",
+    "upload_post_auto_upload",
+    "upload_post_youtube_privacy_status",
+)
 
 
 def is_running_in_container(
@@ -137,17 +145,51 @@ def load_config():
 
     logger.info(f"load config from file: {config_file}")
 
+    _config_ = _read_config_file()
+    return _migrate_upload_post_config(_config_)
+
+
+def _read_config_file():
     try:
-        _config_ = toml.load(config_file)
+        return toml.load(config_file)
     except Exception as e:
         logger.warning(f"load config failed: {str(e)}, try to load as utf-8-sig")
         with open(config_file, mode="r", encoding="utf-8-sig") as fp:
             _cfg_content = fp.read()
-            _config_ = toml.loads(_cfg_content)
+            return toml.loads(_cfg_content)
+
+
+def _migrate_upload_post_config(_config_):
+    app_cfg = _config_.setdefault("app", {})
+    ui_cfg = _config_.get("ui", {})
+
+    if not isinstance(app_cfg, dict) or not isinstance(ui_cfg, dict):
+        return _config_
+
+    migrated = False
+    for key in _UPLOAD_POST_KEYS:
+        if key in ui_cfg:
+            if key not in app_cfg:
+                app_cfg[key] = ui_cfg[key]
+            del ui_cfg[key]
+            migrated = True
+
+    if migrated and not ui_cfg:
+        _config_.pop("ui", None)
+
     return _config_
 
 
 def save_config():
+    file_cfg = _read_config_file()
+    file_cfg = _migrate_upload_post_config(file_cfg)
+    file_app = file_cfg.get("app", {})
+
+    if isinstance(file_app, dict):
+        for key in _UPLOAD_POST_KEYS:
+            if key in file_app:
+                app[key] = file_app[key]
+
     with open(config_file, "w", encoding="utf-8") as f:
         _cfg["app"] = app
         _cfg["azure"] = azure

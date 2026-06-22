@@ -18,11 +18,13 @@ compute_type = config.whisper.get("compute_type", "int8")
 model = None
 
 
-def create(audio_file, subtitle_file: str = ""):
+def _get_model():
     global model
     if WhisperModel is None:
-        logger.warning("faster_whisper not available, skipping whisper subtitle generation")
-        return ""
+        logger.warning(
+            "faster_whisper not available, skipping whisper subtitle generation"
+        )
+        return None
     if not model:
         model_path = f"{utils.root_dir()}/models/whisper-{model_size}"
         model_bin_file = f"{model_path}/model.bin"
@@ -46,12 +48,45 @@ def create(audio_file, subtitle_file: str = ""):
                 f"********************************************\n\n"
             )
             return None
+    return model
+
+
+def transcribe_text(audio_file: str) -> str:
+    """Transcribe source media into plain text for LLM-grounded rewriting."""
+    whisper_model = _get_model()
+    if whisper_model is None:
+        raise RuntimeError(
+            "Faster-Whisper is unavailable. Install dependencies and configure the "
+            "[whisper] section before importing media without captions."
+        )
+
+    logger.info(f"transcribing source media audio: {audio_file}")
+    segments, info = whisper_model.transcribe(
+        audio_file,
+        beam_size=5,
+        vad_filter=True,
+        vad_parameters=dict(min_silence_duration_ms=500),
+    )
+    transcript = " ".join(
+        segment.text.strip() for segment in segments if segment.text.strip()
+    ).strip()
+    logger.info(
+        f"source media language: '{info.language}', probability: "
+        f"{info.language_probability:.2f}"
+    )
+    return transcript
+
+
+def create(audio_file, subtitle_file: str = ""):
+    whisper_model = _get_model()
+    if whisper_model is None:
+        return ""
 
     logger.info(f"start, output file: {subtitle_file}")
     if not subtitle_file:
         subtitle_file = f"{audio_file}.srt"
 
-    segments, info = model.transcribe(
+    segments, info = whisper_model.transcribe(
         audio_file,
         beam_size=5,
         word_timestamps=True,

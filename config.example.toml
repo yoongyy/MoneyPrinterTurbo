@@ -15,6 +15,15 @@ edge_tts_timeout = 30
 # 只有在企业代理或自签证书环境明确需要时，才临时改为 false。
 tls_verify = true
 
+# YouTube/TikTok source ingestion limits. Existing platform captions are used first;
+# only the audio track is downloaded when local Whisper transcription is required.
+media_source_max_duration_minutes = 120
+media_source_max_download_mb = 250
+
+# Optional Netscape-format cookies file for age-restricted, region-restricted, or
+# login-protected media that you are authorized to access. Leave empty for public media.
+media_source_cookie_file = ""
+
 # Pexels API Key
 # Register at https://www.pexels.com/api/ to get your API key.
 # You can use multiple keys to avoid rate limits.
@@ -304,6 +313,29 @@ max_concurrent_tasks = 5
 # 并发任务已满后的最大排队任务数，超过后接口返回 429，避免匿名请求无限堆积
 max_queued_tasks = 100
 
+########## Upload-Post (Cross-post to TikTok/Instagram/YouTube Shorts)
+# Upload-Post allows you to automatically cross-post generated videos to TikTok, Instagram and YouTube Shorts.
+# Visit https://upload-post.com to create an account and get your API key.
+# API Documentation: https://docs.upload-post.com
+
+# Enable/disable Upload-Post integration
+upload_post_enabled = false
+
+# Your Upload-Post API key
+upload_post_api_key = ""
+
+# Your Upload-Post username
+upload_post_username = ""
+
+# Platforms to cross-post to (options: "tiktok", "instagram", "youtube")
+upload_post_platforms = ["tiktok", "instagram"]
+
+# Automatically cross-post videos after generation (if false, you'll need to call the API manually)
+upload_post_auto_upload = false
+
+# YouTube Shorts privacy status (options: "public", "unlisted", "private")
+upload_post_youtube_privacy_status = "public"
+
 
 [whisper]
 # Only effective when subtitle_provider is "whisper"
@@ -356,26 +388,3 @@ hide_log = false
 # 自定义位置，表示离顶部的百分比 (0-100)，仅当 subtitle_position = "custom" 时生效
 # Custom position as percentage from top (0-100), only effective when subtitle_position = "custom"
 # custom_position = 70.0
-
-########## Upload-Post (Cross-post to TikTok/Instagram/YouTube Shorts)
-# Upload-Post allows you to automatically cross-post generated videos to TikTok, Instagram and YouTube Shorts.
-# Visit https://upload-post.com to create an account and get your API key.
-# API Documentation: https://docs.upload-post.com
-
-# Enable/disable Upload-Post integration
-upload_post_enabled = false
-
-# Your Upload-Post API key
-upload_post_api_key = ""
-
-# Your Upload-Post username
-upload_post_username = ""
-
-# Platforms to cross-post to (options: "tiktok", "instagram", "youtube")
-upload_post_platforms = ["tiktok", "instagram"]
-
-# Automatically cross-post videos after generation (if false, you'll need to call the API manually)
-upload_post_auto_upload = false
-
-# YouTube Shorts privacy status (options: "public", "unlisted", "private")
-upload_post_youtube_privacy_status = "public"

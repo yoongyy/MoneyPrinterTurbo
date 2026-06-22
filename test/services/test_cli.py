@@ -9,6 +9,24 @@ import cli
 
 
 class TestCli(unittest.TestCase):
+    def test_source_url_can_replace_video_subject(self):
+        args = cli.parse_args(
+            [
+                "--source-url",
+                "https://example.com/story",
+                "--script-style",
+                "podcast",
+                "--secondary-voice-name",
+                "en-US-GuyNeural-Male",
+            ]
+        )
+        params = cli.build_video_params(args)
+
+        self.assertEqual(params.video_subject, "")
+        self.assertEqual(params.source_url, "https://example.com/story")
+        self.assertEqual(params.script_style.value, "podcast")
+        self.assertEqual(params.voice_name_2, "en-US-GuyNeural-Male")
+
     def test_build_video_params_with_local_materials(self):
         args = cli.parse_args(
             [

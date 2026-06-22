@@ -4,26 +4,93 @@ import re
 from os import path
 
 from loguru import logger
+from pydub import AudioSegment
 
 from app.config import config
 from app.models import const
 from app.models.schema import VideoConcatMode, VideoParams
-from app.services import llm, material, subtitle, video, voice, upload_post
+from app.services import (
+    content_source,
+    dialogue,
+    llm,
+    material,
+    subtitle,
+    video,
+    voice,
+    upload_post,
+)
 from app.services import state as sm
 from app.utils import file_security, utils
+
+
+_WINDOWS_RESERVED_FILENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def subject_video_filename(subject: str, index: int = 1, total: int = 1) -> str:
+    """Return a portable final-video filename based on the video subject."""
+    stem = re.sub(r'[\x00-\x1f\x7f<>:"/\\|?*]+', "-", str(subject or ""))
+    stem = re.sub(r"\s+", " ", stem).strip(" .-")
+    if not stem:
+        stem = "video"
+    if stem.split(".", 1)[0].upper() in _WINDOWS_RESERVED_FILENAMES:
+        stem = f"_{stem}"
+
+    sequence = f"-{index}" if total > 1 else ""
+    max_stem_bytes = 240 - len(sequence.encode("utf-8"))
+    stem = stem.encode("utf-8")[:max_stem_bytes].decode("utf-8", errors="ignore")
+    stem = stem.rstrip(" .-") or "video"
+    return f"{stem}{sequence}.mp4"
 
 
 def generate_script(task_id, params):
     logger.info("\n\n## generating video script")
     video_script = params.video_script.strip()
     if not video_script:
-        video_script = llm.generate_script(
+        source_content = ""
+        source_title = ""
+        source_url = (getattr(params, "source_url", "") or "").strip()
+        if source_url:
+            source_type = getattr(params, "source_type", "article")
+            try:
+                resolved_source = content_source.fetch_source_content(
+                    source_type, source_url
+                )
+            except Exception as exc:
+                sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+                logger.error(f"failed to extract source content: {str(exc)}")
+                return None
+            source_content = resolved_source.content
+            source_title = resolved_source.title
+            source_url = resolved_source.final_url
+            params.source_url = source_url
+            if not params.video_subject:
+                params.video_subject = source_title or source_url
+
+        generate_kwargs = dict(
             video_subject=params.video_subject,
             language=params.video_language,
+            video_duration_minutes=getattr(params, "video_duration_minutes", 1),
             paragraph_number=params.paragraph_number,
             video_script_prompt=params.video_script_prompt,
             custom_system_prompt=params.custom_system_prompt,
         )
+        if source_content or dialogue.is_dialogue_style(
+            getattr(params, "script_style", "narration")
+        ):
+            generate_kwargs.update(
+                script_style=getattr(params, "script_style", "narration"),
+                source_content=source_content,
+                source_title=source_title,
+                source_url=source_url,
+            )
+        video_script = llm.generate_script(**generate_kwargs)
     else:
         logger.debug(f"video script: \n{video_script}")
 
@@ -39,12 +106,15 @@ def generate_terms(task_id, params, video_script):
     logger.info("\n\n## generating video terms")
     video_terms = params.video_terms
     if not video_terms:
+        searchable_script = dialogue.strip_speaker_labels(
+            video_script, getattr(params, "script_style", "narration")
+        )
         # 开启素材按文案顺序匹配后，关键词本身也必须按脚本叙事顺序生成；
         # 否则后续即使顺序下载和顺序拼接，也只能复用一组全局主题词，
         # 无法改善“后面内容的画面提前出现”的问题。
         video_terms = llm.generate_terms(
             video_subject=params.video_subject,
-            video_script=video_script,
+            video_script=searchable_script,
             amount=8 if params.match_materials_to_script else 5,
             match_script_order=params.match_materials_to_script,
         )
@@ -117,8 +187,149 @@ def resolve_custom_audio_file(task_id: str, custom_audio_file: str | None) -> st
     return server_audio_file
 
 
+def _parse_srt_timestamp(value: str) -> float:
+    hours, minutes, seconds = value.strip().replace(".", ",").split(":")
+    whole_seconds, milliseconds = seconds.split(",")
+    return (
+        int(hours) * 3600
+        + int(minutes) * 60
+        + int(whole_seconds)
+        + int(milliseconds) / 1000
+    )
+
+
+def _format_srt_timestamp(value: float) -> str:
+    total_milliseconds = max(0, round(value * 1000))
+    hours, remainder = divmod(total_milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, milliseconds = divmod(remainder, 1000)
+    return f"{hours:02}:{minutes:02}:{seconds:02},{milliseconds:03}"
+
+
+def _write_dialogue_subtitle(
+    timeline: dialogue.DialogueSubtitleTimeline, subtitle_path: str
+):
+    items = []
+    for index, cue in enumerate(timeline.cues, start=1):
+        items.append(
+            f"{index}\n{_format_srt_timestamp(cue.start)} --> "
+            f"{_format_srt_timestamp(cue.end)}\n{cue.text}\n"
+        )
+    with open(subtitle_path, "w", encoding="utf-8") as file:
+        file.write("\n".join(items))
+
+
+def _segment_subtitle_cues(
+    sub_maker, segment: dialogue.DialogueSegment, segment_file: str, duration: float
+) -> list[dialogue.SubtitleCue]:
+    segment_srt = f"{segment_file}.srt"
+    try:
+        voice.create_subtitle(
+            text=segment.text, sub_maker=sub_maker, subtitle_file=segment_srt
+        )
+        cues = []
+        for _, timing, text in subtitle.file_to_subtitles(segment_srt):
+            start_text, end_text = [item.strip() for item in timing.split("-->", 1)]
+            cues.append(
+                dialogue.SubtitleCue(
+                    start=_parse_srt_timestamp(start_text),
+                    end=_parse_srt_timestamp(end_text),
+                    text=f"{segment.speaker}: {text}",
+                )
+            )
+        if cues:
+            return cues
+    except Exception as exc:
+        logger.warning(f"failed to build detailed dialogue subtitle cue: {str(exc)}")
+    finally:
+        if os.path.exists(segment_srt):
+            os.remove(segment_srt)
+
+    return [
+        dialogue.SubtitleCue(
+            start=0.0,
+            end=max(0.1, duration),
+            text=f"{segment.speaker}: {segment.text}",
+        )
+    ]
+
+
+def _generate_dialogue_audio(task_id, params, video_script):
+    segments = dialogue.parse_dialogue_script(
+        video_script, getattr(params, "script_style", "narration")
+    )
+    if not segments:
+        return None, None, None
+
+    primary_voice = voice.parse_voice_name(params.voice_name)
+    secondary_voice = voice.parse_voice_name(
+        getattr(params, "voice_name_2", "") or params.voice_name
+    )
+    speaker_voices = dialogue.assign_speaker_voices(
+        segments, primary_voice, secondary_voice
+    )
+    pause_seconds = float(getattr(params, "dialogue_pause", 0.2) or 0.0)
+    pause_milliseconds = round(max(0.0, min(2.0, pause_seconds)) * 1000)
+
+    AudioSegment.converter = utils.get_ffmpeg_binary()
+    combined_audio = AudioSegment.empty()
+    timeline_cues: list[dialogue.SubtitleCue] = []
+    segment_files = []
+
+    try:
+        for index, segment in enumerate(segments, start=1):
+            segment_file = path.join(
+                utils.task_dir(task_id), f"dialogue-{index:03}.mp3"
+            )
+            segment_files.append(segment_file)
+            segment_sub_maker = voice.tts(
+                text=segment.text,
+                voice_name=speaker_voices[segment.speaker],
+                voice_rate=params.voice_rate,
+                voice_file=segment_file,
+            )
+            if segment_sub_maker is None or not os.path.exists(segment_file):
+                raise ValueError(
+                    f"failed to synthesize dialogue audio for speaker {segment.speaker}"
+                )
+
+            segment_audio = AudioSegment.from_file(segment_file)
+            offset_seconds = len(combined_audio) / 1000
+            segment_duration = len(segment_audio) / 1000
+            for cue in _segment_subtitle_cues(
+                segment_sub_maker, segment, segment_file, segment_duration
+            ):
+                timeline_cues.append(
+                    dialogue.SubtitleCue(
+                        start=offset_seconds + cue.start,
+                        end=offset_seconds + cue.end,
+                        text=cue.text,
+                    )
+                )
+            combined_audio += segment_audio
+            if index < len(segments) and pause_milliseconds:
+                combined_audio += AudioSegment.silent(duration=pause_milliseconds)
+
+        audio_file = path.join(utils.task_dir(task_id), "audio.mp3")
+        exported_audio = combined_audio.export(audio_file, format="mp3", bitrate="192k")
+        exported_audio.close()
+        audio_duration = len(combined_audio) / 1000
+        return (
+            audio_file,
+            audio_duration,
+            dialogue.DialogueSubtitleTimeline(cues=timeline_cues),
+        )
+    except Exception as exc:
+        logger.error(f"failed to generate dialogue audio: {str(exc)}")
+        return None, None, None
+    finally:
+        for segment_file in segment_files:
+            if os.path.exists(segment_file):
+                os.remove(segment_file)
+
+
 def generate_audio(task_id, params, video_script):
-    '''
+    """
     Generate audio for the video script.
     If a custom audio file is provided, it will be used directly.
     There will be no subtitle maker object returned in this case.
@@ -127,7 +338,7 @@ def generate_audio(task_id, params, video_script):
         - audio_file: path to the generated or provided audio file
         - audio_duration: duration of the audio in seconds
         - sub_maker: subtitle maker object if TTS is used, None otherwise
-    '''
+    """
     logger.info("\n\n## generating audio")
     # /audio 和 /subtitle 请求模型不包含 custom_audio_file，
     # 这里统一做兼容读取，避免直调接口时抛属性错误。
@@ -146,6 +357,9 @@ def generate_audio(task_id, params, video_script):
 
     if not custom_audio_file:
         logger.info("no custom audio file provided, using TTS to generate audio.")
+        if dialogue.is_dialogue_style(getattr(params, "script_style", "narration")):
+            return _generate_dialogue_audio(task_id, params, video_script)
+
         audio_file = path.join(utils.task_dir(task_id), "audio.mp3")
         sub_maker = voice.tts(
             text=video_script,
@@ -177,14 +391,15 @@ def generate_audio(task_id, params, video_script):
             return None, None, None
         return custom_audio_file, audio_duration, None
 
+
 def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
-    '''
+    """
     Generate subtitle for the video script.
     If subtitle generation is disabled or no subtitle maker is provided, it will return an empty string.
     Otherwise, it will generate the subtitle using the specified provider.
     Returns:
         - subtitle_path: path to the generated subtitle file
-    '''
+    """
     logger.info("\n\n## generating subtitle")
     if not params.subtitle_enabled or sub_maker is None:
         return ""
@@ -195,9 +410,12 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
 
     subtitle_fallback = False
     if subtitle_provider == "edge":
-        voice.create_subtitle(
-            text=video_script, sub_maker=sub_maker, subtitle_file=subtitle_path
-        )
+        if isinstance(sub_maker, dialogue.DialogueSubtitleTimeline):
+            _write_dialogue_subtitle(sub_maker, subtitle_path)
+        else:
+            voice.create_subtitle(
+                text=video_script, sub_maker=sub_maker, subtitle_file=subtitle_path
+            )
         if not os.path.exists(subtitle_path):
             subtitle_fallback = True
             logger.warning("subtitle file not found, fallback to whisper")
@@ -205,7 +423,12 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     if subtitle_provider == "whisper" or subtitle_fallback:
         subtitle.create(audio_file=audio_file, subtitle_file=subtitle_path)
         logger.info("\n\n## correcting subtitle")
-        subtitle.correct(subtitle_file=subtitle_path, video_script=video_script)
+        subtitle.correct(
+            subtitle_file=subtitle_path,
+            video_script=dialogue.strip_speaker_labels(
+                video_script, getattr(params, "script_style", "narration")
+            ),
+        )
 
     subtitle_lines = subtitle.file_to_subtitles(subtitle_path)
     if not subtitle_lines:
@@ -291,7 +514,14 @@ def generate_final_videos(
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
 
-        final_video_path = path.join(utils.task_dir(task_id), f"final-{index}.mp4")
+        final_video_path = path.join(
+            utils.task_dir(task_id),
+            subject_video_filename(
+                params.video_subject,
+                index=index,
+                total=params.video_count,
+            ),
+        )
 
         logger.info(f"\n\n## generating video: {index} => {final_video_path}")
         video.generate_video(
@@ -403,7 +633,7 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     # 仅完整视频生成流程才需要处理视频拼接模式；
     # 这样可以避免 /subtitle 和 /audio 这类请求访问不存在的字段。
-    if type(params.video_concat_mode) is str:
+    if isinstance(params.video_concat_mode, str):
         params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
 
     # 6. Generate final videos
@@ -421,7 +651,10 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     # 7. Cross-post to social platforms (if enabled)
     cross_post_results = []
-    if upload_post.upload_post_service.is_configured() and upload_post.upload_post_service.auto_upload:
+    if (
+        upload_post.upload_post_service.is_configured()
+        and upload_post.upload_post_service.auto_upload
+    ):
         platforms = upload_post.upload_post_service.platforms
         logger.info(f"\n\n## cross-posting videos to {', '.join(platforms)}")
 
@@ -448,10 +681,12 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
                 youtube_extra=youtube_extra,
             )
             cross_post_results.append(result)
-            if result.get('success'):
+            if result.get("success"):
                 logger.info(f"✅ Cross-posted: {video_path}")
             else:
-                logger.warning(f"⚠️ Failed to cross-post: {video_path} - {result.get('error', 'Unknown error')}")
+                logger.warning(
+                    f"⚠️ Failed to cross-post: {video_path} - {result.get('error', 'Unknown error')}"
+                )
 
     kwargs = {
         "videos": final_video_paths,

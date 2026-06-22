@@ -1,6 +1,6 @@
 import warnings
 from enum import Enum
-from typing import Any, List, Optional, Union
+from typing import Any, List, Literal, Optional, Union
 
 import pydantic
 from pydantic import BaseModel, Field
@@ -27,6 +27,19 @@ class VideoTransitionMode(str, Enum):
     fade_out = "FadeOut"
     slide_in = "SlideIn"
     slide_out = "SlideOut"
+
+
+class ScriptStyle(str, Enum):
+    narration = "narration"
+    podcast = "podcast"
+    talkshow = "talkshow"
+    crosstalk = "crosstalk"
+
+
+class SourceType(str, Enum):
+    article = "article"
+    youtube = "youtube"
+    tiktok = "tiktok"
 
 
 class VideoAspect(str, Enum):
@@ -70,12 +83,16 @@ class VideoParams(BaseModel):
     }
     """
 
-    video_subject: str
+    video_subject: str = ""
+    source_type: SourceType = SourceType.article
+    source_url: str = Field(default="", max_length=2048)
+    script_style: ScriptStyle = ScriptStyle.narration
     video_script: str = ""  # Script used to generate the video
     video_terms: Optional[str | list] = None  # Keywords used to generate the video
     video_aspect: Optional[VideoAspect] = VideoAspect.portrait.value
     video_concat_mode: Optional[VideoConcatMode] = VideoConcatMode.random.value
     video_transition_mode: Optional[VideoTransitionMode] = None
+    video_duration_minutes: Literal[1, 2, 3, 5] = 1
     video_clip_duration: Optional[int] = 5
     match_materials_to_script: bool = False
     video_count: Optional[int] = 1
@@ -84,19 +101,25 @@ class VideoParams(BaseModel):
     video_materials: Optional[List[MaterialInfo]] = (
         None  # Materials used to generate the video
     )
-    
-    custom_audio_file: Optional[str] = None  # Custom audio file path, will ignore video_script and disable subtitle
+
+    custom_audio_file: Optional[str] = (
+        None  # Custom audio file path, will ignore video_script and disable subtitle
+    )
     video_language: Optional[str] = ""  # auto detect
 
     voice_name: Optional[str] = ""
+    voice_name_2: Optional[str] = ""
     voice_volume: Optional[float] = 1.0
     voice_rate: Optional[float] = 1.0
+    dialogue_pause: float = Field(default=0.2, ge=0.0, le=2.0)
     bgm_type: Optional[str] = "random"
     bgm_file: Optional[str] = ""
     bgm_volume: Optional[float] = 0.2
 
     subtitle_enabled: Optional[bool] = True
-    subtitle_position: Optional[str] = config.ui.get("subtitle_position", "bottom")  # top, bottom, center, custom
+    subtitle_position: Optional[str] = config.ui.get(
+        "subtitle_position", "bottom"
+    )  # top, bottom, center, custom
     custom_position: float = config.ui.get("custom_position", 70.0)
     font_name: Optional[str] = "STHeitiMedium.ttc"
     text_fore_color: Optional[str] = "#FFFFFF"
@@ -116,6 +139,9 @@ class SubtitleRequest(BaseModel):
     video_script: str
     video_language: Optional[str] = ""
     voice_name: Optional[str] = "zh-CN-XiaoxiaoNeural-Female"
+    voice_name_2: Optional[str] = ""
+    script_style: ScriptStyle = ScriptStyle.narration
+    dialogue_pause: float = Field(default=0.2, ge=0.0, le=2.0)
     voice_volume: Optional[float] = 1.0
     voice_rate: Optional[float] = 1.2
     bgm_type: Optional[str] = "random"
@@ -137,6 +163,9 @@ class AudioRequest(BaseModel):
     video_script: str
     video_language: Optional[str] = ""
     voice_name: Optional[str] = "zh-CN-XiaoxiaoNeural-Female"
+    voice_name_2: Optional[str] = ""
+    script_style: ScriptStyle = ScriptStyle.narration
+    dialogue_pause: float = Field(default=0.2, ge=0.0, le=2.0)
     voice_volume: Optional[float] = 1.0
     voice_rate: Optional[float] = 1.2
     bgm_type: Optional[str] = "random"
@@ -150,14 +179,19 @@ class VideoScriptParams:
     {
       "video_subject": "春天的花海",
       "video_language": "",
+      "video_duration_minutes": 3,
       "paragraph_number": 1,
       "video_script_prompt": "",
       "custom_system_prompt": ""
     }
     """
 
-    video_subject: Optional[str] = "春天的花海"
+    video_subject: Optional[str] = ""
+    source_type: SourceType = SourceType.article
+    source_url: str = Field(default="", max_length=2048)
+    script_style: ScriptStyle = ScriptStyle.narration
     video_language: Optional[str] = ""
+    video_duration_minutes: Literal[1, 2, 3, 5] = 1
     paragraph_number: int = Field(default=1, ge=1, le=10)
     video_script_prompt: str = Field(default="", max_length=2000)
     custom_system_prompt: str = Field(default="", max_length=8000)
@@ -177,6 +211,7 @@ class VideoTermsParams:
         "春天的花海，如诗如画般展现在眼前。万物复苏的季节里，大地披上了一袭绚丽多彩的盛装。金黄的迎春、粉嫩的樱花、洁白的梨花、艳丽的郁金香……"
     )
     amount: Optional[int] = 5
+    script_style: ScriptStyle = ScriptStyle.narration
 
 
 class VideoSocialMetadataParams:
@@ -251,7 +286,7 @@ class TaskQueryResponse(BaseResponse):
                     "state": 1,
                     "progress": 100,
                     "videos": [
-                        "http://127.0.0.1:8080/tasks/6c85c8cc-a77a-42b9-bc30-947815aa0558/final-1.mp4"
+                        "http://127.0.0.1:8080/tasks/6c85c8cc-a77a-42b9-bc30-947815aa0558/Example-Subject.mp4"
                     ],
                     "combined_videos": [
                         "http://127.0.0.1:8080/tasks/6c85c8cc-a77a-42b9-bc30-947815aa0558/combined-1.mp4"
@@ -271,7 +306,7 @@ class TaskDeletionResponse(BaseResponse):
                     "state": 1,
                     "progress": 100,
                     "videos": [
-                        "http://127.0.0.1:8080/tasks/6c85c8cc-a77a-42b9-bc30-947815aa0558/final-1.mp4"
+                        "http://127.0.0.1:8080/tasks/6c85c8cc-a77a-42b9-bc30-947815aa0558/Example-Subject.mp4"
                     ],
                     "combined_videos": [
                         "http://127.0.0.1:8080/tasks/6c85c8cc-a77a-42b9-bc30-947815aa0558/combined-1.mp4"
@@ -349,6 +384,7 @@ class BgmUploadResponse(BaseResponse):
             },
         }
 
+
 class VideoMaterialRetrieveResponse(BaseResponse):
     class Config:
         json_schema_extra = {
@@ -366,6 +402,7 @@ class VideoMaterialRetrieveResponse(BaseResponse):
                 },
             },
         }
+
 
 class VideoMaterialUploadResponse(BaseResponse):
     class Config:
