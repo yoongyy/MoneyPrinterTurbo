@@ -374,6 +374,8 @@ upload_post_auto_upload = false
 # YouTube Shorts privacy status (options: "public", "unlisted", "private")
 upload_post_youtube_privacy_status = "public"
 
+[automation]
+
 ########## Automated News Video Pipeline
 # Runs one crawl -> AI select -> source validate -> video generation cycle.
 # Intended for Windows Task Scheduler or cron:
@@ -392,7 +394,7 @@ automation_retry_failed_sources = false
 
 # Add your real sources in config.toml. Examples:
 # automation_sources = [
-#   { name = "Sin Chew Nation", source_type = "article", url = "https://www.sinchew.com.my/category/%e5%9b%bd%e5%86%85/", crawl = "links", max_candidates = 12, include_patterns = ["/news/"] },
+#   { name = "Sin Chew Latest", source_type = "article", url = "https://www.sinchew.com.my/latest", crawl = "links", max_candidates = 20, include_patterns = ["/news/2026"], exclude_patterns = ["/entertainment/", "/sports/"] },
 #   { name = "Toutiao", source_type = "article", url = "https://www.toutiao.com/", crawl = "links", max_candidates = 12 },
 #   { name = "YouTube Channel", source_type = "youtube", url = "https://www.youtube.com/@CHANNEL/videos", crawl = "yt-dlp", max_candidates = 8 },
 #   { name = "TikTok Profile", source_type = "tiktok", url = "https://www.tiktok.com/@ACCOUNT", crawl = "yt-dlp", max_candidates = 8 },

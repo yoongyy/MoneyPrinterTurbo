@@ -105,15 +105,21 @@ def transcribe_text(audio_file: str) -> str:
     with tempfile.TemporaryDirectory(prefix="mpt-whisper-") as temp_dir:
         whisper_audio_file = _prepare_audio_for_whisper(audio_file, temp_dir)
         logger.info(f"transcribing source media audio: {whisper_audio_file}")
-        segments, info = whisper_model.transcribe(
-            whisper_audio_file,
-            beam_size=5,
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500),
-        )
-        transcript = " ".join(
-            segment.text.strip() for segment in segments if segment.text.strip()
-        ).strip()
+        try:
+            segments, info = whisper_model.transcribe(
+                whisper_audio_file,
+                beam_size=5,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=500),
+            )
+            transcript = " ".join(
+                segment.text.strip() for segment in segments if segment.text.strip()
+            ).strip()
+        except ValueError as exc:
+            if "max() arg is an empty sequence" not in str(exc):
+                raise
+            logger.warning("Whisper did not detect speech in source media")
+            return ""
     logger.info(
         f"source media language: '{info.language}', probability: "
         f"{info.language_probability:.2f}"
