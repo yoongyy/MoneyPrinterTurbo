@@ -374,6 +374,58 @@ upload_post_auto_upload = false
 # YouTube Shorts privacy status (options: "public", "unlisted", "private")
 upload_post_youtube_privacy_status = "public"
 
+########## Automated News Video Pipeline
+# Runs one crawl -> AI select -> source validate -> video generation cycle.
+# Intended for Windows Task Scheduler or cron:
+#   python scripts/auto_news_video.py
+#
+# This pipeline prepares videos and metadata under storage/ready_to_upload.
+# It does not upload to TikTok automatically.
+automation_enabled = false
+automation_topic = "current Malaysia, China, Singapore, or international news suitable for a Chinese short video"
+automation_ready_dir = "storage/ready_to_upload"
+automation_state_db = "storage/automation/automation.sqlite3"
+automation_max_total_candidates = 40
+automation_selection_attempts = 5
+automation_min_content_chars = 120
+automation_retry_failed_sources = false
+
+# Add your real sources in config.toml. Examples:
+# automation_sources = [
+#   { name = "Sin Chew Nation", source_type = "article", url = "https://www.sinchew.com.my/category/%e5%9b%bd%e5%86%85/", crawl = "links", max_candidates = 12, include_patterns = ["/news/"] },
+#   { name = "Toutiao", source_type = "article", url = "https://www.toutiao.com/", crawl = "links", max_candidates = 12 },
+#   { name = "YouTube Channel", source_type = "youtube", url = "https://www.youtube.com/@CHANNEL/videos", crawl = "yt-dlp", max_candidates = 8 },
+#   { name = "TikTok Profile", source_type = "tiktok", url = "https://www.tiktok.com/@ACCOUNT", crawl = "yt-dlp", max_candidates = 8 },
+# ]
+automation_sources = []
+
+# Video defaults used by the automation runner.
+automation_video_duration_minutes = 1
+automation_video_language = ""
+automation_script_style = "narration"
+automation_video_source = "pexels"
+automation_video_aspect = "9:16"
+automation_video_layout_style = "news_card"
+automation_news_card_background_color = "#CBEFF7"
+automation_voice_name = "zh-CN-XiaoxiaoNeural-Female"
+automation_voice_name_2 = ""
+automation_bgm_type = "random"
+automation_bgm_volume = 0.2
+automation_subtitle_enabled = true
+automation_font_name = "STHeitiMedium.ttc"
+automation_text_fore_color = "#FFFFFF"
+automation_stroke_color = "#000000"
+automation_stroke_width = 1.5
+automation_video_clip_duration = 3
+automation_video_count = 1
+automation_n_threads = 2
+automation_match_materials_to_script = true
+automation_generate_video_cover = true
+automation_cover_generation_provider = "local"
+automation_paragraph_number = 1
+automation_video_script_prompt = "Create a concise news-style short video script. Stay factual, avoid sensationalism, and do not add unsupported details."
+automation_custom_system_prompt = ""
+
 
 [whisper]
 # Only effective when subtitle_provider is "whisper"
