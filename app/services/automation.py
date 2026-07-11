@@ -428,7 +428,7 @@ def source_content_hash(source: content_source.SourceContent) -> str:
 
 
 def _config_bool(key: str, default: bool = False) -> bool:
-    value = config.app.get(key, default)
+    value = _automation_config_value(key, default)
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
@@ -436,14 +436,27 @@ def _config_bool(key: str, default: bool = False) -> bool:
 
 def _config_int(key: str, default: int) -> int:
     try:
-        return int(config.app.get(key, default))
+        return int(_automation_config_value(key, default))
     except (TypeError, ValueError):
         return default
 
 
 def _config_list(key: str) -> list[Any]:
-    value = config.app.get(key, [])
+    value = _automation_config_value(key, [])
     return value if isinstance(value, list) else []
+
+
+def _automation_config_value(key: str, default: Any = None) -> Any:
+    raw_config = getattr(config, "_cfg", {})
+    automation_cfg = raw_config.get("automation", {}) if isinstance(raw_config, dict) else {}
+    if isinstance(automation_cfg, dict):
+        if key in automation_cfg:
+            return automation_cfg[key]
+        if key.startswith("automation_"):
+            short_key = key.removeprefix("automation_")
+            if short_key in automation_cfg:
+                return automation_cfg[short_key]
+    return config.app.get(key, default)
 
 
 def _compile_patterns(values: Any) -> list[re.Pattern]:
@@ -715,7 +728,7 @@ def select_candidate_with_ai(candidates: list[SourceCandidate]) -> SelectedSourc
     if len(candidates) == 1:
         return SelectedSource(candidate=candidates[0], reason="only candidate")
 
-    topic = str(config.app.get("automation_topic", "") or "").strip()
+    topic = str(_automation_config_value("automation_topic", "") or "").strip()
     compact_candidates = [
         {
             "index": index,
@@ -772,7 +785,7 @@ def validate_source_with_ai(source: content_source.SourceContent) -> ValidatedSo
             f"source content is too short: {len(content)} chars, need at least {min_content_chars}"
         )
 
-    topic = str(config.app.get("automation_topic", "") or "").strip()
+    topic = str(_automation_config_value("automation_topic", "") or "").strip()
     prompt = f"""
 Validate this source for an automated short-form news video.
 
@@ -813,7 +826,6 @@ Content preview:
 
 
 def _build_video_params(validated: ValidatedSource) -> VideoParams:
-    app_cfg = config.app
     params_data: dict[str, Any] = {
         "video_subject": validated.title,
         "source_type": validated.source.source_type,
@@ -821,33 +833,78 @@ def _build_video_params(validated: ValidatedSource) -> VideoParams:
         "source_title": validated.title or validated.source.title,
         "source_cover_image_url": validated.source.cover_image_url,
         "video_duration_minutes": _config_int("automation_video_duration_minutes", 1),
-        "video_language": str(app_cfg.get("automation_video_language", "") or ""),
-        "script_style": str(app_cfg.get("automation_script_style", "narration") or "narration"),
-        "video_source": str(app_cfg.get("automation_video_source", app_cfg.get("video_source", "pexels")) or "pexels"),
-        "video_aspect": str(app_cfg.get("automation_video_aspect", "9:16") or "9:16"),
-        "video_layout_style": str(app_cfg.get("automation_video_layout_style", app_cfg.get("video_layout_style", "full")) or "full"),
-        "news_card_background_color": str(app_cfg.get("automation_news_card_background_color", app_cfg.get("news_card_background_color", "#CBEFF7")) or "#CBEFF7"),
-        "voice_name": str(app_cfg.get("automation_voice_name", config.ui.get("voice_name", "zh-CN-XiaoxiaoNeural-Female")) or "zh-CN-XiaoxiaoNeural-Female"),
-        "voice_name_2": str(app_cfg.get("automation_voice_name_2", config.ui.get("voice_name_2", "")) or ""),
-        "bgm_type": str(app_cfg.get("automation_bgm_type", "random") or "random"),
-        "bgm_volume": float(app_cfg.get("automation_bgm_volume", 0.2) or 0.2),
-        "subtitle_enabled": bool(app_cfg.get("automation_subtitle_enabled", True)),
-        "font_name": str(app_cfg.get("automation_font_name", config.ui.get("font_name", "STHeitiMedium.ttc")) or "STHeitiMedium.ttc"),
-        "text_fore_color": str(app_cfg.get("automation_text_fore_color", config.ui.get("text_fore_color", "#FFFFFF")) or "#FFFFFF"),
-        "stroke_color": str(app_cfg.get("automation_stroke_color", "#000000") or "#000000"),
-        "stroke_width": float(app_cfg.get("automation_stroke_width", 1.5) or 1.5),
+        "video_language": str(_automation_config_value("automation_video_language", "") or ""),
+        "script_style": str(_automation_config_value("automation_script_style", "narration") or "narration"),
+        "video_source": str(
+            _automation_config_value(
+                "automation_video_source", config.app.get("video_source", "pexels")
+            )
+            or "pexels"
+        ),
+        "video_aspect": str(_automation_config_value("automation_video_aspect", "9:16") or "9:16"),
+        "video_layout_style": str(
+            _automation_config_value(
+                "automation_video_layout_style",
+                config.app.get("video_layout_style", "full"),
+            )
+            or "full"
+        ),
+        "news_card_background_color": str(
+            _automation_config_value(
+                "automation_news_card_background_color",
+                config.app.get("news_card_background_color", "#CBEFF7"),
+            )
+            or "#CBEFF7"
+        ),
+        "voice_name": str(
+            _automation_config_value(
+                "automation_voice_name",
+                config.ui.get("voice_name", "zh-CN-XiaoxiaoNeural-Female"),
+            )
+            or "zh-CN-XiaoxiaoNeural-Female"
+        ),
+        "voice_name_2": str(
+            _automation_config_value(
+                "automation_voice_name_2", config.ui.get("voice_name_2", "")
+            )
+            or ""
+        ),
+        "bgm_type": str(_automation_config_value("automation_bgm_type", "random") or "random"),
+        "bgm_volume": float(_automation_config_value("automation_bgm_volume", 0.2) or 0.2),
+        "subtitle_enabled": _config_bool("automation_subtitle_enabled", True),
+        "font_name": str(
+            _automation_config_value(
+                "automation_font_name", config.ui.get("font_name", "STHeitiMedium.ttc")
+            )
+            or "STHeitiMedium.ttc"
+        ),
+        "text_fore_color": str(
+            _automation_config_value(
+                "automation_text_fore_color",
+                config.ui.get("text_fore_color", "#FFFFFF"),
+            )
+            or "#FFFFFF"
+        ),
+        "stroke_color": str(_automation_config_value("automation_stroke_color", "#000000") or "#000000"),
+        "stroke_width": float(_automation_config_value("automation_stroke_width", 1.5) or 1.5),
         "video_clip_duration": _config_int("automation_video_clip_duration", 3),
         "video_count": _config_int("automation_video_count", 1),
         "n_threads": _config_int("automation_n_threads", 2),
-        "match_materials_to_script": bool(app_cfg.get("automation_match_materials_to_script", True)),
-        "generate_video_cover": bool(app_cfg.get("automation_generate_video_cover", True)),
-        "cover_generation_provider": str(app_cfg.get("automation_cover_generation_provider", app_cfg.get("cover_generation_provider", "local")) or "local"),
+        "match_materials_to_script": _config_bool("automation_match_materials_to_script", True),
+        "generate_video_cover": _config_bool("automation_generate_video_cover", True),
+        "cover_generation_provider": str(
+            _automation_config_value(
+                "automation_cover_generation_provider",
+                config.app.get("cover_generation_provider", "local"),
+            )
+            or "local"
+        ),
         "paragraph_number": _config_int("automation_paragraph_number", 1),
-        "video_script_prompt": str(app_cfg.get("automation_video_script_prompt", "") or ""),
-        "custom_system_prompt": str(app_cfg.get("automation_custom_system_prompt", "") or ""),
+        "video_script_prompt": str(_automation_config_value("automation_video_script_prompt", "") or ""),
+        "custom_system_prompt": str(_automation_config_value("automation_custom_system_prompt", "") or ""),
     }
 
-    overrides = app_cfg.get("automation_video_params", {})
+    overrides = _automation_config_value("automation_video_params", {})
     if isinstance(overrides, dict):
         for key, value in overrides.items():
             if key in VIDEO_PARAM_CONFIG_KEYS:
@@ -871,7 +928,7 @@ def _copy_outputs_to_ready_dir(
     selected_reason: str,
 ) -> tuple[Path, Path, tuple[str, ...]]:
     ready_root = _resolve_project_path(
-        str(config.app.get("automation_ready_dir", DEFAULT_READY_DIR) or DEFAULT_READY_DIR)
+        str(_automation_config_value("automation_ready_dir", DEFAULT_READY_DIR) or DEFAULT_READY_DIR)
     )
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     ready_dir = ready_root / f"{timestamp}-{_slugify(validated.title)}"
@@ -897,7 +954,7 @@ def _copy_outputs_to_ready_dir(
     metadata = llm.generate_social_metadata(
         video_subject=validated.title,
         video_script=str(task_result.get("script", "") or ""),
-        language=str(config.app.get("automation_video_language", "") or "auto"),
+        language=str(_automation_config_value("automation_video_language", "") or "auto"),
         platform="tiktok",
     )
     manifest = {
@@ -990,7 +1047,7 @@ def run_once() -> AutomationRunResult:
             error="automation_enabled is false in config.toml",
         )
 
-    store = SeenStore(str(config.app.get("automation_state_db", DEFAULT_STATE_DB)))
+    store = SeenStore(str(_automation_config_value("automation_state_db", DEFAULT_STATE_DB)))
     candidates = crawl_sources(store=store)
     if not candidates:
         return AutomationRunResult(success=False, error="no new source candidates found")
