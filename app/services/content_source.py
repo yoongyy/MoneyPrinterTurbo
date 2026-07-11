@@ -15,7 +15,6 @@ import subprocess
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from loguru import logger
-from pydub import AudioSegment
 
 from app.config import config
 from app.services import article, subtitle
@@ -298,6 +297,13 @@ def _ytdlp_options(work_dir: Path) -> dict:
     return options
 
 
+def _raise_audio_extraction_error(context: str, result) -> None:
+    details = (getattr(result, "stderr", "") or getattr(result, "stdout", "") or "").strip()
+    if "matches no streams" in details or "matches no stream" in details:
+        raise ValueError("the media does not contain an audio stream")
+    raise RuntimeError(f"failed to extract audio for {context}: {details}")
+
+
 def _require_ytdlp():
     if YoutubeDL is None:
         raise RuntimeError(
@@ -504,7 +510,11 @@ def _download_audio(url: str, work_dir: Path) -> Path:
     options = _ytdlp_options(work_dir)
     options.update(
         {
-            "format": "bestaudio/best",
+            # TikTok frequently exposes H.265/bytevc1 variants that yt-dlp marks
+            # as having AAC, but the downloaded file can be video-only. Prefer
+            # true audio-only first; if unavailable, prefer H.264 formats that
+            # reliably carry the audio track before falling back to generic best.
+            "format": "bestaudio/best[vcodec=h264][acodec!=none]/best[acodec!=none]/best",
             "max_filesize": max_download_mb * 1024 * 1024,
             "overwrites": True,
         }
@@ -541,9 +551,23 @@ def _prepare_audio_for_gemini(audio_file: str, work_dir: Path) -> Path:
         return source_path
 
     converted_path = work_dir / "source-gemini.mp3"
-    AudioSegment.converter = utils.get_ffmpeg_binary()
-    audio_segment = AudioSegment.from_file(str(source_path))
-    audio_segment.export(converted_path, format="mp3", bitrate="128k")
+    command = [
+        utils.get_ffmpeg_binary(),
+        "-y",
+        "-i",
+        str(source_path),
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-acodec",
+        "libmp3lame",
+        "-b:a",
+        "128k",
+        str(converted_path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0 or not converted_path.is_file():
+        _raise_audio_extraction_error("Gemini", result)
     logger.info(
         f"converted source media audio for Gemini: {source_path.name} -> {converted_path.name}"
     )
@@ -661,6 +685,44 @@ def _fetch_media_content(source_type: str, url: str) -> SourceContent:
         title=str(info.get("title") or "").strip(),
         content=transcript,
         extraction_method=extraction_method,
+        cover_image_url=_pick_thumbnail_url(info),
+    )
+
+
+def fetch_source_metadata(source_type: str, url: str) -> SourceContent:
+    source_type = normalize_source_type(source_type)
+    if source_type == SOURCE_ARTICLE:
+        result = article.fetch_url_content(url)
+        return SourceContent(
+            source_type=source_type,
+            source_url=result.source_url,
+            final_url=article.safe_display_url(result.final_url),
+            title=result.title,
+            content="",
+            extraction_method="article-metadata",
+            cover_image_url=result.cover_image_url,
+        )
+
+    source_url = validate_media_url(source_type, url)
+    logger.info(
+        f"extracting {source_type} source metadata: {safe_media_url(source_type, source_url)}"
+    )
+    with tempfile.TemporaryDirectory(prefix="mpt-source-") as temp_dir:
+        work_dir = Path(temp_dir)
+        with _dns_fallback_context():
+            info = _extract_media_info(source_url, work_dir)
+
+    final_url = safe_media_url(
+        source_type,
+        str(info.get("webpage_url") or info.get("original_url") or source_url),
+    )
+    return SourceContent(
+        source_type=source_type,
+        source_url=safe_media_url(source_type, source_url),
+        final_url=final_url,
+        title=str(info.get("title") or "").strip(),
+        content="",
+        extraction_method="metadata",
         cover_image_url=_pick_thumbnail_url(info),
     )
 

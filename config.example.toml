@@ -1,4 +1,6 @@
 [app]
+gemini_api_key = ""
+gemini_api_key2 = ""
 video_source = "pexels" # "pexels" or "pixabay"
 
 # 是否隐藏配置面板
@@ -59,6 +61,7 @@ coverr_api_keys = []
 
 # 支持的提供商 (Supported providers):
 #   openai
+#   openrouter  (OpenAI-compatible gateway)
 #   aihubmix   (OpenAI-compatible AI model gateway)
 #   aimlapi     (OpenAI-compatible multi-model AI API)
 #   moonshot    (月之暗面)
@@ -76,6 +79,31 @@ coverr_api_keys = []
 #   modelscope  (魔搭社区)
 #   litellm     (100+ providers via LiteLLM gateway)
 llm_provider = "openai"
+video_layout_style = "full"
+news_card_background_color = "#CBEFF7"
+
+########## Cover Image Generation Settings
+# local      = use the built-in renderer with the source/stock image
+# openrouter = generate an AI thumbnail background through OpenRouter /api/v1/images,
+#              then render the exact title locally for readable text
+# openai     = generate an AI thumbnail background through OpenAI Images,
+#              then render the exact title locally for readable text
+cover_generation_provider = "local"
+openai_image_model_name = "gpt-image-1"
+openai_image_quality = "high"
+openai_image_model_presets = ["gpt-image-1"]
+openrouter_image_model_name = "google/gemini-2.5-flash-image"
+openrouter_image_quality = "high"
+openrouter_image_model_presets = [
+    "openai/gpt-image-2",
+    "openai/gpt-image-1",
+    "google/gemini-2.5-flash-image",
+    "google/gemini-2.5-flash-image-preview",
+    "black-forest-labs/flux.2-pro",
+    "black-forest-labs/flux.2-klein-4b",
+]
+# If your default image model is too expensive, change it here or from the WebUI
+# Basic Settings panel.
 
 ########## Pollinations AI Settings
 # Visit https://pollinations.ai/ to learn more
@@ -107,6 +135,16 @@ openai_base_url = ""
 # Check your available models at https://platform.openai.com/account/limits
 # 如果使用兼容供应商，请填写该平台要求的模型 ID。
 openai_model_name = "gpt-4o-mini"
+
+########## OpenRouter API Key
+# OpenRouter is OpenAI-compatible and can route one API key to many models.
+# Visit https://openrouter.ai/settings/keys to create your API key.
+openrouter_api_key = ""
+openrouter_base_url = "https://openrouter.ai/api/v1"
+openrouter_model_name = "openai/gpt-4o-mini"
+# Optional attribution headers. You can leave these as defaults.
+openrouter_http_referer = "https://github.com/harry0703/MoneyPrinterTurbo"
+openrouter_app_title = "MoneyPrinterTurbo"
 
 ########## AIHubMix API Key
 # AIHubMix is OpenAI-compatible and can use one API key to access multiple models.

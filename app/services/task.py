@@ -32,6 +32,9 @@ _WINDOWS_RESERVED_FILENAMES = {
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
+_TARGET_AUDIO_DURATION_OVERAGE_RATIO = 1.15
+_TARGET_AUDIO_DURATION_OVERAGE_SECONDS = 15
+_MAX_SCRIPT_AUDIO_REWRITE_ATTEMPTS = 2
 
 
 def subject_video_filename(subject: str, index: int = 1, total: int = 1) -> str:
@@ -50,15 +53,42 @@ def subject_video_filename(subject: str, index: int = 1, total: int = 1) -> str:
     return f"{stem}{sequence}.mp4"
 
 
+def _target_audio_duration_seconds(params: VideoParams) -> int:
+    try:
+        minutes = int(getattr(params, "video_duration_minutes", 1) or 1)
+    except (TypeError, ValueError):
+        minutes = 1
+    return max(1, minutes) * 60
+
+
+def _max_audio_duration_seconds(params: VideoParams) -> float:
+    target_seconds = _target_audio_duration_seconds(params)
+    return max(
+        target_seconds * _TARGET_AUDIO_DURATION_OVERAGE_RATIO,
+        target_seconds + _TARGET_AUDIO_DURATION_OVERAGE_SECONDS,
+    )
+
+
+def _audio_exceeds_target(params: VideoParams, audio_duration: float | int | None) -> bool:
+    if not audio_duration:
+        return False
+    if getattr(params, "custom_audio_file", None):
+        return False
+    return float(audio_duration) > _max_audio_duration_seconds(params)
+
+
 def generate_script(task_id, params):
     logger.info("\n\n## generating video script")
     video_script = params.video_script.strip()
-    if not video_script:
-        source_content = ""
-        source_title = ""
-        source_url = (getattr(params, "source_url", "") or "").strip()
-        if source_url:
-            source_type = getattr(params, "source_type", "article")
+    source_content = ""
+    source_title = getattr(params, "source_title", "") or ""
+    source_url = (getattr(params, "source_url", "") or "").strip()
+    source_cover_image_url = getattr(params, "source_cover_image_url", "") or ""
+
+    resolved_source = None
+    if source_url:
+        source_type = getattr(params, "source_type", "article")
+        if not video_script:
             try:
                 resolved_source = content_source.fetch_source_content(
                     source_type, source_url
@@ -68,14 +98,27 @@ def generate_script(task_id, params):
                 logger.error(f"failed to extract source content: {str(exc)}")
                 return None
             source_content = resolved_source.content
-            source_title = resolved_source.title
-            source_url = resolved_source.final_url
+        elif not source_title or not source_cover_image_url or not params.video_subject:
+            try:
+                resolved_source = content_source.fetch_source_metadata(
+                    source_type, source_url
+                )
+            except Exception as exc:
+                logger.warning(f"failed to resolve source metadata: {str(exc)}")
+
+        if resolved_source:
+            source_title = resolved_source.title or source_title
+            source_url = resolved_source.final_url or source_url
+            source_cover_image_url = (
+                resolved_source.cover_image_url or source_cover_image_url
+            )
             params.source_url = source_url
             params.source_title = source_title
-            params.source_cover_image_url = resolved_source.cover_image_url
+            params.source_cover_image_url = source_cover_image_url
             if not params.video_subject:
                 params.video_subject = source_title or source_url
 
+    if not video_script:
         generate_kwargs = dict(
             video_subject=params.video_subject,
             language=params.video_language,
@@ -503,11 +546,16 @@ def generate_final_videos(
             utils.task_dir(task_id), f"combined-{index}.mp4"
         )
         logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
+        combine_video_aspect = (
+            VideoAspect.landscape
+            if getattr(params, "video_layout_style", "full") == "news_card"
+            else params.video_aspect
+        )
         video.combine_videos(
             combined_video_path=combined_video_path,
             video_paths=downloaded_videos,
             audio_file=audio_file,
-            video_aspect=params.video_aspect,
+            video_aspect=combine_video_aspect,
             video_concat_mode=video_concat_mode,
             video_transition_mode=video_transition_mode,
             max_clip_duration=params.video_clip_duration,
@@ -562,28 +610,46 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         )
         return {"script": video_script}
 
-    # 2. Generate terms
-    video_terms = ""
-    if params.video_source != "local":
-        video_terms = generate_terms(task_id, params, video_script)
-        if not video_terms:
+    # 2. Generate audio first, then enforce the requested target duration against
+    # the real TTS duration. LLMs can over-generate even when prompted for
+    # "3 minutes"; without this guard, ffmpeg will build a video as long as the
+    # oversized voiceover.
+    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
+    audio_file, audio_duration, sub_maker = None, None, None
+    for rewrite_attempt in range(_MAX_SCRIPT_AUDIO_REWRITE_ATTEMPTS + 1):
+        audio_file, audio_duration, sub_maker = generate_audio(
+            task_id, params, video_script
+        )
+        if not audio_file:
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
             return
 
-    save_script_data(task_id, video_script, video_terms, params)
+        if not _audio_exceeds_target(params, audio_duration):
+            break
 
-    if stop_at == "terms":
-        sm.state.update_task(
-            task_id, state=const.TASK_STATE_COMPLETE, progress=100, terms=video_terms
+        if rewrite_attempt >= _MAX_SCRIPT_AUDIO_REWRITE_ATTEMPTS:
+            logger.warning(
+                "generated audio is still longer than the target duration after "
+                f"{_MAX_SCRIPT_AUDIO_REWRITE_ATTEMPTS} rewrite attempt(s): "
+                f"audio={audio_duration:.2f}s, target={_target_audio_duration_seconds(params)}s"
+            )
+            break
+
+        logger.warning(
+            "generated audio exceeds target duration; shortening script and "
+            f"regenerating audio. audio={audio_duration:.2f}s, "
+            f"max_allowed={_max_audio_duration_seconds(params):.2f}s"
         )
-        return {"script": video_script, "terms": video_terms}
+        shortened_script = llm.shorten_script_to_duration(
+            video_script=video_script,
+            video_duration_minutes=getattr(params, "video_duration_minutes", 1),
+            script_style=getattr(params, "script_style", "narration"),
+        )
+        if not shortened_script or shortened_script.strip() == video_script.strip():
+            logger.warning("script shortening did not produce a shorter replacement")
+            break
+        video_script = shortened_script.strip()
 
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
-
-    # 3. Generate audio
-    audio_file, audio_duration, sub_maker = generate_audio(
-        task_id, params, video_script
-    )
     if not audio_file:
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return
@@ -598,6 +664,23 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
             audio_file=audio_file,
         )
         return {"audio_file": audio_file, "audio_duration": audio_duration}
+
+    # 3. Generate terms after any duration rewrite so the downloaded visuals
+    # match the final script instead of an oversized draft.
+    video_terms = ""
+    if params.video_source != "local":
+        video_terms = generate_terms(task_id, params, video_script)
+        if not video_terms:
+            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+            return
+
+    save_script_data(task_id, video_script, video_terms, params)
+
+    if stop_at == "terms":
+        sm.state.update_task(
+            task_id, state=const.TASK_STATE_COMPLETE, progress=100, terms=video_terms
+        )
+        return {"script": video_script, "terms": video_terms}
 
     # 4. Generate subtitle
     subtitle_path = generate_subtitle(
@@ -653,21 +736,51 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     )
 
     cover_image_path = ""
+    cover_error = ""
     cover_title = cover.clean_cover_title(
-        getattr(params, "source_title", "") or params.video_subject
+        params.video_subject or getattr(params, "source_title", "")
     )
     if getattr(params, "generate_video_cover", True):
+        cover_provider = (
+            getattr(params, "cover_generation_provider", "")
+            or config.app.get("cover_generation_provider", "local")
+            or "local"
+        )
+        cover_output_file = path.join(utils.task_dir(task_id), "cover.jpg")
+        cover_title_text = cover_title or params.video_subject
         cover_source_image = getattr(params, "source_cover_image_url", "") or ""
-        if cover_source_image:
-            cover_image_path = cover.generate_video_cover(
-                source_image_ref=cover_source_image,
-                title=cover_title or params.video_subject,
-                output_file=path.join(utils.task_dir(task_id), "cover.jpg"),
-                video_aspect=params.video_aspect,
-                font_name=params.font_name,
-            )
-        else:
-            logger.warning("no source image available; skipping generated cover")
+        if cover_provider and cover_provider != cover.AI_COVER_PROVIDER_LOCAL:
+            try:
+                cover_image_path = cover.generate_ai_video_cover(
+                    title=cover_title_text,
+                    output_file=cover_output_file,
+                    video_aspect=params.video_aspect,
+                    font_name=params.font_name,
+                    provider=cover_provider,
+                )
+            except Exception as exc:
+                cover_error = str(exc)
+                logger.warning(
+                    f"failed to generate AI cover via {cover_provider}: {cover_error}"
+                )
+        if not cover_image_path:
+            if not cover_source_image:
+                cover_source_image = material.find_stock_cover_image(
+                    task_id=task_id,
+                    search_term=cover_title_text or getattr(params, "source_url", ""),
+                    source=getattr(params, "video_source", "pexels") or "pexels",
+                    video_aspect=params.video_aspect,
+                )
+            if cover_source_image:
+                cover_image_path = cover.generate_video_cover(
+                    source_image_ref=cover_source_image,
+                    title=cover_title_text,
+                    output_file=cover_output_file,
+                    video_aspect=params.video_aspect,
+                    font_name=params.font_name,
+                )
+        if not cover_image_path:
+            logger.warning("no usable cover image available; skipping generated cover")
 
     # 7. Cross-post to social platforms (if enabled)
     cross_post_results = []
@@ -725,6 +838,7 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         "subtitle_path": subtitle_path,
         "materials": downloaded_videos,
         "cover_image": cover_image_path or None,
+        "cover_error": cover_error or None,
         "cross_post_results": cross_post_results if cross_post_results else None,
     }
     sm.state.update_task(

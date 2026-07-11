@@ -1,7 +1,9 @@
 import html
 import ipaddress
 import re
+import shutil
 import socket
+import subprocess
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
@@ -256,12 +258,99 @@ def _jina_reader_url(url: str) -> str:
     return f"https://r.jina.ai/http://{parsed.netloc}{path}"
 
 
-def _extract_jina_content(text: str) -> tuple[str, str]:
+def _should_skip_jina_fallback(url: str) -> bool:
+    hostname = (urlparse(url or "").hostname or "").lower().rstrip(".")
+    return hostname == "toutiao.com" or hostname.endswith(".toutiao.com")
+
+
+def _extract_first_image_url(text: str) -> str:
+    patterns = (
+        r"!\[[^\]]*?\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)",
+        r'<img[^>]+src=["\']([^"\']+)["\']',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def _extract_jina_content(text: str) -> tuple[str, str, str]:
     title_match = re.search(r"^Title:\s*(.+)$", text, re.MULTILINE)
     content_match = re.search(r"Markdown Content:\s*(.*)$", text, re.DOTALL)
     title = title_match.group(1).strip() if title_match else ""
     content = content_match.group(1).strip() if content_match else text.strip()
-    return title, content
+    cover_image_url = _extract_first_image_url(content) or _extract_first_image_url(text)
+    return title, content, cover_image_url
+
+
+def _chromium_executable() -> str:
+    for candidate in (
+        "chromium",
+        "chromium-browser",
+        "google-chrome",
+        "google-chrome-stable",
+        "chrome",
+    ):
+        executable = shutil.which(candidate)
+        if executable:
+            return executable
+    return ""
+
+
+def _fetch_rendered_html(url: str) -> str:
+    chromium = _chromium_executable()
+    if not chromium:
+        raise ValueError("headless Chromium is not available")
+
+    last_error: Exception | None = None
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        command = [
+            chromium,
+            "--headless",
+            "--disable-gpu",
+            "--disable-extensions",
+            "--disable-background-networking",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--mute-audio",
+            "--virtual-time-budget=10000",
+            "--dump-dom",
+            url,
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=18,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            last_error = exc
+            logger.warning(
+                f"Chromium render timed out, attempt {attempt + 1}/{max_attempts}"
+            )
+            continue
+        except OSError as exc:
+            raise ValueError(f"headless Chromium could not be started: {exc}") from exc
+
+        rendered_html = (result.stdout or "").strip()
+        if rendered_html:
+            return rendered_html
+
+        stderr = (result.stderr or "").strip()
+        if stderr:
+            logger.warning(f"Chromium render produced no output: {stderr[:500]}")
+        last_error = ValueError("headless Chromium did not return rendered HTML")
+
+    if isinstance(last_error, subprocess.TimeoutExpired):
+        raise ValueError("headless Chromium timed out while rendering the article") from last_error
+    if last_error:
+        raise ValueError(str(last_error)) from last_error
+    raise ValueError("headless Chromium did not return rendered HTML")
 
 
 def fetch_url_content(url: str) -> ArticleContent:
@@ -278,16 +367,54 @@ def fetch_url_content(url: str) -> ArticleContent:
         len(content) < MIN_USEFUL_CONTENT_CHARACTERS
         and config.app.get("url_content_use_jina_fallback", True)
     ):
-        logger.info("direct article extraction was sparse, trying the Jina Reader fallback")
-        _, _, jina_raw = _fetch_text(_jina_reader_url(final_url))
-        jina_title, jina_content = _extract_jina_content(jina_raw)
-        if len(jina_content) > len(content):
-            title = jina_title or title
-            content = jina_content
+        if _should_skip_jina_fallback(final_url):
+            logger.info(
+                "direct article extraction was sparse, skipping Jina Reader for a "
+                "known blocked domain and trying the local Chromium render fallback"
+            )
+        else:
+            logger.info(
+                "direct article extraction was sparse, trying the Jina Reader fallback"
+            )
+            try:
+                _, _, jina_raw = _fetch_text(_jina_reader_url(final_url))
+            except Exception as exc:
+                logger.warning(f"Jina Reader fallback failed: {exc}")
+            else:
+                jina_title, jina_content, jina_cover_image_url = _extract_jina_content(
+                    jina_raw
+                )
+                if len(jina_content) > len(content):
+                    title = jina_title or title
+                    content = jina_content
+                if not cover_image_url and jina_cover_image_url:
+                    cover_image_url = jina_cover_image_url
+
+    if len(content) < MIN_USEFUL_CONTENT_CHARACTERS:
+        logger.info(
+            "article extraction was still sparse, trying the local Chromium render fallback"
+        )
+        try:
+            rendered_html = _fetch_rendered_html(final_url)
+        except Exception as exc:
+            logger.warning(f"Chromium render fallback failed: {exc}")
+        else:
+            chromium_title, chromium_content, chromium_cover_image_url = (
+                extract_article_text(rendered_html)
+            )
+            if len(chromium_content) > len(content):
+                title = chromium_title or title
+                content = chromium_content
+            if not cover_image_url and chromium_cover_image_url:
+                cover_image_url = chromium_cover_image_url
 
     content = content.strip()[:MAX_ARTICLE_CHARACTERS]
     if len(content) < 80:
-        raise ValueError("article URL did not contain enough readable content")
+        if not title.strip():
+            raise ValueError("article URL did not contain enough readable content")
+        logger.warning(
+            "article URL yielded sparse content; continuing with the extracted title"
+        )
 
     if cover_image_url:
         cover_image_url = urljoin(final_url, cover_image_url)

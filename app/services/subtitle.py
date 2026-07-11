@@ -1,6 +1,8 @@
 import json
 import os.path
 import re
+import subprocess
+import tempfile
 from timeit import default_timer as timer
 
 try:
@@ -16,6 +18,7 @@ model_size = config.whisper.get("model_size", "large-v3")
 device = config.whisper.get("device", "cpu")
 compute_type = config.whisper.get("compute_type", "int8")
 model = None
+_WHISPER_AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus"}
 
 
 def _get_model():
@@ -51,6 +54,45 @@ def _get_model():
     return model
 
 
+def _raise_audio_extraction_error(context: str, result) -> None:
+    details = (getattr(result, "stderr", "") or getattr(result, "stdout", "") or "").strip()
+    if "matches no streams" in details or "matches no stream" in details:
+        raise ValueError("the media does not contain an audio stream")
+    raise RuntimeError(f"failed to extract audio for {context}: {details}")
+
+
+def _prepare_audio_for_whisper(audio_file: str, work_dir: str) -> str:
+    source_path = os.path.abspath(audio_file)
+    if os.path.splitext(source_path)[1].lower() in _WHISPER_AUDIO_EXTENSIONS:
+        return source_path
+
+    converted_path = os.path.join(
+        work_dir, f"{os.path.splitext(os.path.basename(source_path))[0]}-whisper.mp3"
+    )
+    command = [
+        utils.get_ffmpeg_binary(),
+        "-y",
+        "-i",
+        source_path,
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-acodec",
+        "libmp3lame",
+        "-b:a",
+        "128k",
+        converted_path,
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0 or not os.path.isfile(converted_path):
+        _raise_audio_extraction_error("Whisper", result)
+    logger.info(
+        f"converted source media for Whisper: {os.path.basename(source_path)} -> "
+        f"{os.path.basename(converted_path)}"
+    )
+    return converted_path
+
+
 def transcribe_text(audio_file: str) -> str:
     """Transcribe source media into plain text for LLM-grounded rewriting."""
     whisper_model = _get_model()
@@ -60,16 +102,18 @@ def transcribe_text(audio_file: str) -> str:
             "[whisper] section before importing media without captions."
         )
 
-    logger.info(f"transcribing source media audio: {audio_file}")
-    segments, info = whisper_model.transcribe(
-        audio_file,
-        beam_size=5,
-        vad_filter=True,
-        vad_parameters=dict(min_silence_duration_ms=500),
-    )
-    transcript = " ".join(
-        segment.text.strip() for segment in segments if segment.text.strip()
-    ).strip()
+    with tempfile.TemporaryDirectory(prefix="mpt-whisper-") as temp_dir:
+        whisper_audio_file = _prepare_audio_for_whisper(audio_file, temp_dir)
+        logger.info(f"transcribing source media audio: {whisper_audio_file}")
+        segments, info = whisper_model.transcribe(
+            whisper_audio_file,
+            beam_size=5,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500),
+        )
+        transcript = " ".join(
+            segment.text.strip() for segment in segments if segment.text.strip()
+        ).strip()
     logger.info(
         f"source media language: '{info.language}', probability: "
         f"{info.language_probability:.2f}"

@@ -57,6 +57,30 @@ class TestMaterialTlsVerification(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertTrue(get.call_args.kwargs["verify"])
 
+    def test_search_images_pexels_returns_photo_urls(self):
+        config.app["pexels_api_keys"] = ["pexels-key"]
+        config.app.pop("tls_verify", None)
+        config.proxy.clear()
+
+        fake_response = SimpleNamespace(
+            json=lambda: {
+                "photos": [
+                    {
+                        "src": {
+                            "small": "https://example.com/small.jpg",
+                            "large": "https://example.com/large.jpg",
+                            "original": "https://example.com/original.jpg",
+                        }
+                    }
+                ]
+            }
+        )
+
+        with patch("app.services.material.requests.get", return_value=fake_response):
+            results = material.search_images_pexels("city")
+
+        self.assertEqual(results, ["https://example.com/large.jpg"])
+
     def test_search_pixabay_allows_explicit_tls_disable_for_proxy(self):
         """
         少数企业代理会使用自签证书。该场景必须显式配置关闭 TLS 校验，
@@ -177,6 +201,62 @@ class TestMaterialTlsVerification(unittest.TestCase):
             ],
         )
         self.assertEqual(result, ["/tmp/a1.mp4", "/tmp/b1.mp4", "/tmp/a2.mp4"])
+
+    def test_find_stock_cover_image_prefers_provider_then_falls_back(self):
+        with (
+            patch.object(material, "search_images_pexels", return_value=[]),
+            patch.object(material, "search_images_pixabay", return_value=["https://example.com/cover.jpg"]),
+            patch.object(material, "_download_image_to_file", return_value="/tmp/cover.jpg") as download_image,
+            patch.object(material.utils, "task_dir", return_value="/tmp/task-id"),
+        ):
+            result = material.find_stock_cover_image(
+                task_id="task-id",
+                search_term="city",
+                source="pexels",
+            )
+
+        self.assertEqual(result, "/tmp/cover.jpg")
+        download_image.assert_called_once_with("https://example.com/cover.jpg", "/tmp/task-id")
+
+    def test_find_stock_cover_image_can_use_coverr_frame(self):
+        class FakeClip:
+            def __init__(self, path):
+                self.path = path
+
+            def get_frame(self, _time):
+                return [[[1, 2, 3]]]
+
+            def close(self):
+                return None
+
+        class FakeImage:
+            def convert(self, _mode):
+                return self
+
+            def save(self, path, format="JPEG", quality=94, optimize=True):
+                Path(path).write_bytes(b"jpg")
+
+        with (
+            patch.object(material, "search_images_pexels", return_value=[]),
+            patch.object(material, "search_images_pixabay", return_value=[]),
+            patch.object(
+                material,
+                "search_videos_coverr",
+                return_value=[material.MaterialInfo(provider="coverr", url="https://example.com/video.mp4", duration=5)],
+            ),
+            patch.object(material, "save_video", return_value="/tmp/video.mp4"),
+            patch.object(material, "VideoFileClip", FakeClip),
+            patch.object(material.Image, "fromarray", return_value=FakeImage()),
+            patch.object(material.utils, "task_dir", return_value="/tmp/task-id"),
+        ):
+            result = material.find_stock_cover_image(
+                task_id="task-id",
+                search_term="city",
+                source="coverr",
+            )
+
+        self.assertEqual(result, "/tmp/task-id/coverr-" + material.utils.md5("/tmp/video.mp4") + ".jpg")
+        self.assertTrue(Path(result).exists())
 
 
 class TestCoverrProvider(unittest.TestCase):

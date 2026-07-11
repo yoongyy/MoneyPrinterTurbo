@@ -4,6 +4,7 @@ import io
 import os
 import random
 import gc
+import re
 import shutil
 import subprocess
 import sys
@@ -75,6 +76,8 @@ fps = 30
 _VIDEO_DURATION_SAFETY_MARGIN = 0.1
 _BGM_EXTENSIONS = (".mp3",)
 _DEFAULT_VIDEO_CODEC = "libx264"
+VIDEO_LAYOUT_STYLE_FULL = "full"
+VIDEO_LAYOUT_STYLE_NEWS_CARD = "news_card"
 _SUPPORTED_VIDEO_CODECS = (
     "libx264",
     "h264_nvenc",
@@ -893,6 +896,187 @@ def _get_visible_center_position(
     return x, y
 
 
+def _get_video_layout_style(params: VideoParams) -> str:
+    return str(
+        getattr(params, "video_layout_style", VIDEO_LAYOUT_STYLE_FULL) or ""
+    ).lower()
+
+
+def _clean_layout_title(text: str, max_chars: int = 26) -> str:
+    value = re.sub(r"[!！?？,，。；;、~～/|&]+", " ", str(text or ""))
+    value = re.sub(r"[^\w\s\u4e00-\u9fff]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip(" -_.,:;，。！？、")
+    return value[:max_chars].strip(" -_.,:;，。！？、")
+
+
+def _mix_rgb(
+    color: tuple[int, int, int], target: tuple[int, int, int], amount: float
+) -> tuple[int, int, int]:
+    return tuple(int(color[i] * (1 - amount) + target[i] * amount) for i in range(3))
+
+
+def _make_news_card_background(
+    width: int, height: int, base_color: str = "#CBEFF7"
+) -> ImageClip:
+    base = _hex_to_rgb(base_color)
+    top = _mix_rgb(base, (255, 255, 255), 0.34)
+    bottom = _mix_rgb(base, (255, 255, 255), 0.12)
+    wave = _mix_rgb(base, (255, 255, 255), 0.22)
+    wave_light = _mix_rgb(base, (255, 255, 255), 0.48)
+    image = Image.new("RGB", (width, height), top)
+    draw = ImageDraw.Draw(image)
+    for y in range(height):
+        ratio = y / max(1, height - 1)
+        color = tuple(
+            int(top[i] * (1 - ratio) + bottom[i] * ratio) for i in range(3)
+        )
+        draw.line([(0, y), (width, y)], fill=color)
+
+    draw.ellipse(
+        [
+            int(width * -0.25),
+            int(height * 0.62),
+            int(width * 1.25),
+            int(height * 1.22),
+        ],
+        fill=wave,
+    )
+    draw.ellipse(
+        [
+            int(width * -0.18),
+            int(height * 0.70),
+            int(width * 1.08),
+            int(height * 1.10),
+        ],
+        fill=wave_light,
+    )
+    draw.rectangle([0, 0, width, int(height * 0.015)], fill=wave_light)
+    return ImageClip(np.array(image))
+
+
+def _make_text_image_clip(
+    text: str,
+    font_path: str,
+    width: int,
+    height: int,
+    font_size: int,
+    color: tuple[int, int, int, int],
+    stroke_color: tuple[int, int, int, int] | None = None,
+    stroke_width: int = 0,
+) -> ImageClip:
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.truetype(font_path, font_size)
+
+    max_text_width = int(width * 0.84)
+    wrapped, _ = wrap_text(
+        text, max_width=max_text_width, font=font_path, fontsize=font_size
+    )
+    while wrapped.count("\n") > 2 and font_size > 42:
+        font_size -= 4
+        font = ImageFont.truetype(font_path, font_size)
+        wrapped, _ = wrap_text(
+            text, max_width=max_text_width, font=font_path, fontsize=font_size
+        )
+
+    bbox = draw.multiline_textbbox(
+        (0, 0),
+        wrapped,
+        font=font,
+        spacing=int(font_size * 0.12),
+        stroke_width=stroke_width,
+        align="center",
+    )
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    x = int((width - text_width) / 2)
+    y = int((height - text_height) / 2)
+    draw.multiline_text(
+        (x, y),
+        wrapped,
+        font=font,
+        fill=color,
+        spacing=int(font_size * 0.12),
+        align="center",
+        stroke_width=stroke_width,
+        stroke_fill=stroke_color,
+    )
+    return ImageClip(np.array(image), transparent=True)
+
+
+def _fit_clip_to_box(video_clip, box_width: int, box_height: int):
+    clip_ratio = video_clip.w / video_clip.h
+    box_ratio = box_width / box_height
+    if abs(clip_ratio - box_ratio) < 0.01:
+        return video_clip.resized(new_size=(box_width, box_height))
+
+    if clip_ratio > box_ratio:
+        scale_factor = box_height / video_clip.h
+    else:
+        scale_factor = box_width / video_clip.w
+
+    resized = video_clip.resized(
+        new_size=(int(video_clip.w * scale_factor), int(video_clip.h * scale_factor))
+    )
+    background = ColorClip(
+        size=(box_width, box_height), color=(0, 0, 0)
+    ).with_duration(video_clip.duration)
+    return CompositeVideoClip(
+        [background, resized.with_position("center")], size=(box_width, box_height)
+    ).with_duration(video_clip.duration)
+
+
+def _apply_news_card_layout(
+    video_clip,
+    params: VideoParams,
+    font_path: str,
+    video_width: int,
+    video_height: int,
+):
+    title = _clean_layout_title(
+        getattr(params, "video_subject", "") or getattr(params, "source_title", "")
+    )
+
+    background = _make_news_card_background(
+        video_width,
+        video_height,
+        getattr(params, "news_card_background_color", "#CBEFF7"),
+    ).with_duration(video_clip.duration)
+    top_panel_height = int(video_height * 0.31)
+    video_box_width = int(video_width * 0.89)
+    video_box_height = int(video_box_width * 9 / 16)
+    video_x = int((video_width - video_box_width) / 2)
+    video_y = top_panel_height
+
+    framed_video = _fit_clip_to_box(video_clip, video_box_width, video_box_height)
+    framed_video = framed_video.with_position((video_x, video_y))
+
+    title_clip = _make_text_image_clip(
+        text=title,
+        font_path=font_path,
+        width=video_width,
+        height=top_panel_height,
+        font_size=max(54, int(video_height * 0.052)),
+        color=(22, 43, 88, 255),
+        stroke_color=(220, 248, 255, 200),
+        stroke_width=max(1, int(video_height * 0.002)),
+    ).with_duration(video_clip.duration)
+
+    return CompositeVideoClip(
+        [background, framed_video, title_clip],
+        size=(video_width, video_height),
+    ).with_duration(video_clip.duration)
+
+
+def _news_card_subtitle_y(video_width: int, video_height: int, clip_height: int) -> int:
+    video_box_width = int(video_width * 0.89)
+    video_box_height = int(video_box_width * 9 / 16)
+    video_bottom = int(video_height * 0.31) + video_box_height
+    preferred_y = video_bottom + int(video_height * 0.055)
+    max_y = video_height - clip_height - int(video_height * 0.08)
+    return max(video_bottom + 24, min(preferred_y, max_y))
+
+
 def generate_video(
     video_path: str,
     audio_path: str,
@@ -914,8 +1098,11 @@ def generate_video(
     # write into the same directory as the output file
     output_dir = os.path.dirname(output_file)
 
+    layout_style = _get_video_layout_style(params)
+    is_news_card_layout = layout_style == VIDEO_LAYOUT_STYLE_NEWS_CARD
+
     font_path = ""
-    if params.subtitle_enabled:
+    if params.subtitle_enabled or is_news_card_layout:
         if not params.font_name:
             params.font_name = "STHeitiMedium.ttc"
         font_path = os.path.join(utils.font_dir(), params.font_name)
@@ -936,8 +1123,10 @@ def generate_video(
         params.font_size = int(params.font_size)
         params.stroke_width = int(params.stroke_width)
         phrase = subtitle_item[1]
-        max_width = video_width * 0.9
-        bg_color = resolve_subtitle_background_color()
+        max_width = video_width * (0.78 if is_news_card_layout else 0.9)
+        bg_color = (
+            None if is_news_card_layout else resolve_subtitle_background_color()
+        )
         rounded_bg_enabled = bool(
             getattr(params, "rounded_subtitle_background", False) and bg_color
         )
@@ -1049,10 +1238,10 @@ def generate_video(
                 text=wrapped_txt,
                 font=font_path,
                 font_size=params.font_size,
-                color=params.text_fore_color,
+                color="#183765" if is_news_card_layout else params.text_fore_color,
                 bg_color=None,
-                stroke_color=params.stroke_color,
-                stroke_width=params.stroke_width,
+                stroke_color="#DFF8FF" if is_news_card_layout else params.stroke_color,
+                stroke_width=1 if is_news_card_layout else params.stroke_width,
                 interline=interline,
                 size=size,
                 text_align="center",
@@ -1062,7 +1251,12 @@ def generate_video(
         _clip = _clip.with_end(subtitle_item[0][1])
         _clip = _clip.with_duration(duration)
         if params.subtitle_position == "bottom":
-            _clip = _clip.with_position(("center", video_height * 0.95 - _clip.h))
+            if is_news_card_layout:
+                _clip = _clip.with_position(
+                    ("center", _news_card_subtitle_y(video_width, video_height, _clip.h))
+                )
+            else:
+                _clip = _clip.with_position(("center", video_height * 0.95 - _clip.h))
         elif params.subtitle_position == "top":
             _clip = _clip.with_position(("center", video_height * 0.05))
         elif params.subtitle_position == "custom":
@@ -1080,6 +1274,15 @@ def generate_video(
         return _clip
 
     video_clip = _open_video_clip_quietly(video_path)
+    if is_news_card_layout:
+        video_clip = _apply_news_card_layout(
+            video_clip=video_clip,
+            params=params,
+            font_path=font_path,
+            video_width=video_width,
+            video_height=video_height,
+        )
+
     audio_clip = AudioFileClip(audio_path).with_effects(
         [afx.MultiplyVolume(params.voice_volume)]
     )

@@ -92,6 +92,8 @@ class VideoParams(BaseModel):
     video_aspect: Optional[VideoAspect] = VideoAspect.portrait.value
     video_concat_mode: Optional[VideoConcatMode] = VideoConcatMode.random.value
     video_transition_mode: Optional[VideoTransitionMode] = None
+    video_layout_style: Optional[str] = "full"
+    news_card_background_color: Optional[str] = "#CBEFF7"
     video_duration_minutes: Literal[1, 2, 3, 5] = 1
     video_clip_duration: Optional[int] = 5
     match_materials_to_script: bool = False
@@ -133,6 +135,7 @@ class VideoParams(BaseModel):
     stroke_width: float = 1.5
     n_threads: Optional[int] = 2
     generate_video_cover: bool = True
+    cover_generation_provider: Optional[str] = "local"
     paragraph_number: int = Field(default=1, ge=1, le=10)
     video_script_prompt: str = Field(default="", max_length=2000)
     custom_system_prompt: str = Field(default="", max_length=8000)

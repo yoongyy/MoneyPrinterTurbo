@@ -1,7 +1,11 @@
 import unittest
 import tempfile
+import sys
 from pathlib import Path
 from unittest.mock import patch
+
+# 测试文件直接运行时，也能从仓库根目录导入 app 包。
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from app.services import article, content_source
 
@@ -63,22 +67,28 @@ This is the transcript.
 
         self.assertEqual(transcript, "Hello world This is the transcript.")
 
-    @patch.object(content_source.AudioSegment, "from_file")
-    def test_prepare_audio_for_gemini_transcodes_webm_to_mp3(self, from_file):
-        class FakeSegment:
-            def export(self, output_path, format="mp3", bitrate=None):
-                Path(output_path).write_bytes(b"mp3-audio")
+    def test_prepare_audio_for_gemini_transcodes_webm_to_mp3(self):
+        class FakeResult:
+            returncode = 0
+            stdout = ""
+            stderr = ""
 
-        from_file.return_value = FakeSegment()
+        def fake_run(command, capture_output=True, text=True):
+            Path(command[-1]).write_bytes(b"mp3-audio")
+            return FakeResult()
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            source = Path(temp_dir) / "source.webm"
-            source.write_bytes(b"audio")
+        with patch.object(content_source.subprocess, "run", side_effect=fake_run) as run:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                source = Path(temp_dir) / "source.webm"
+                source.write_bytes(b"audio")
 
-            result = content_source._prepare_audio_for_gemini(str(source), Path(temp_dir))
-            self.assertEqual(result.name, "source-gemini.mp3")
-            self.assertEqual(result.read_bytes(), b"mp3-audio")
-        from_file.assert_called_once_with(str(source))
+                result = content_source._prepare_audio_for_gemini(
+                    str(source), Path(temp_dir)
+                )
+
+                self.assertEqual(result.name, "source-gemini.mp3")
+                self.assertEqual(result.read_bytes(), b"mp3-audio")
+        run.assert_called_once()
 
     @patch.object(content_source.config, "proxy", {"https": "http://proxy.local:8080"})
     def test_ytdlp_options_includes_proxy(self):
@@ -86,6 +96,35 @@ This is the transcript.
             options = content_source._ytdlp_options(Path(temp_dir))
 
         self.assertEqual(options["proxy"], "http://proxy.local:8080")
+
+    def test_download_audio_prefers_h264_when_audio_only_is_unavailable(self):
+        captured = {}
+
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                captured["format"] = options["format"]
+                self.options = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def download(self, urls):
+                output = Path(self.options["outtmpl"].replace("%(ext)s", "mp4"))
+                output.write_bytes(b"media")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(content_source, "YoutubeDL", FakeYoutubeDL):
+                result = content_source._download_audio(
+                    "https://www.tiktok.com/@creator/video/123", Path(temp_dir)
+                )
+
+        self.assertEqual(result.name, "source.mp4")
+        self.assertIn("bestaudio", captured["format"])
+        self.assertIn("best[vcodec=h264][acodec!=none]", captured["format"])
+        self.assertNotEqual(captured["format"], "bestaudio/best")
 
     def test_pick_thumbnail_url_prefers_best_available_image(self):
         info = {
@@ -99,6 +138,26 @@ This is the transcript.
             content_source._pick_thumbnail_url(info),
             "https://example.com/2.jpg",
         )
+
+    @patch.object(content_source, "_extract_media_info")
+    def test_fetch_source_metadata_for_media_uses_thumbnail_without_transcription(
+        self, extract_info
+    ):
+        extract_info.return_value = {
+            "title": "Video title",
+            "webpage_url": "https://www.youtube.com/watch?v=abc",
+            "thumbnails": [
+                {"url": "https://example.com/thumb-small.jpg", "width": 320, "height": 180},
+                {"url": "https://example.com/thumb.jpg", "width": 1280, "height": 720},
+            ],
+        }
+
+        result = content_source.fetch_source_metadata("youtube", "https://youtu.be/abc")
+
+        self.assertEqual(result.title, "Video title")
+        self.assertEqual(result.cover_image_url, "https://example.com/thumb.jpg")
+        self.assertEqual(result.content, "")
+        self.assertEqual(result.extraction_method, "metadata")
 
     @patch.object(content_source.subtitle, "transcribe_text")
     @patch.object(content_source, "_transcribe_audio_with_gemini", return_value="")

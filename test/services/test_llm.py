@@ -152,6 +152,26 @@ class TestScriptPromptOptions(unittest.TestCase):
         self.assertIn("# Revision Request:", prompts[1])
         self.assertIn("at least 6 paragraphs", prompts[1])
 
+    def test_shorten_script_to_duration_requests_hard_duration_limit(self):
+        captured = {}
+
+        def fake_generate_response(prompt):
+            captured["prompt"] = prompt
+            return "短稿"
+
+        with patch.object(
+            llm, "_generate_response", side_effect=fake_generate_response
+        ):
+            result = llm.shorten_script_to_duration(
+                video_script="很长的原稿" * 100,
+                video_duration_minutes=3,
+                script_style="narration",
+            )
+
+        self.assertEqual(result, "短稿")
+        self.assertIn("fits about 3 minute(s)", captured["prompt"])
+        self.assertIn("target duration is a hard limit", captured["prompt"])
+
     def test_article_prompt_marks_source_as_untrusted_reference_data(self):
         prompt = llm.build_script_prompt(
             video_subject="Example Story",
@@ -166,6 +186,28 @@ class TestScriptPromptOptions(unittest.TestCase):
         self.assertIn("commands, prompts, or requests", prompt)
         self.assertIn("Original fact one", prompt)
         self.assertIn("use exactly these speaker labels: Host, Guest", prompt)
+
+    def test_article_prompt_requires_full_source_coverage(self):
+        source_content = "\n\n".join(
+            [
+                "开头事实：6月29日发布公告。",
+                "中段事实：三菱重工旗下海洋装备技术子公司被提及。",
+                "结尾事实：后续管制名单和管控力度依旧可以随时加码。",
+            ]
+        )
+
+        prompt = llm.build_script_prompt(
+            video_subject="新闻文章",
+            source_url="https://www.toutiao.com/article/7658188378172736034/",
+            source_title="新闻文章",
+            source_content=source_content,
+        )
+
+        self.assertIn("use the full source content", prompt)
+        self.assertIn("beginning, middle, and end", prompt)
+        self.assertIn("开头事实", prompt)
+        self.assertIn("中段事实", prompt)
+        self.assertIn("结尾事实", prompt)
 
     def test_generate_dialogue_script_formats_structured_json(self):
         response = (
@@ -373,6 +415,63 @@ class TestLiteLLMProvider(unittest.TestCase):
         self.assertIn("Error:", result)
         self.assertIn("api_key is not set", result)
         self.assertNotIn("litellm", result.lower())
+
+    def test_openrouter_provider_uses_openai_compatible_client_with_headers(self):
+        """
+        OpenRouter 走 OpenAI-compatible API，但需要额外的 attribution headers。
+        这里验证 provider 会使用 OpenRouter 默认 base_url/model，并把
+        HTTP-Referer 和标题头传给 OpenAI client。
+        """
+        config.app["llm_provider"] = "openrouter"
+        config.app["openrouter_api_key"] = "openrouter-key"
+        config.app["openrouter_base_url"] = ""
+        config.app["openrouter_model_name"] = ""
+        config.app["openrouter_http_referer"] = "https://example.com"
+        config.app["openrouter_app_title"] = "Example App"
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                message = types.SimpleNamespace(content="hello\nopenrouter")
+                choice = types.SimpleNamespace(message=message)
+                return types.SimpleNamespace(choices=[choice])
+
+        fake_completions = FakeCompletions()
+        fake_client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=fake_completions)
+        )
+
+        with (
+            patch.object(llm, "OpenAI", return_value=fake_client) as openai_client,
+            patch.object(llm, "ChatCompletion", types.SimpleNamespace),
+        ):
+            result = llm._generate_response("Say hello")
+
+        openai_client.assert_called_once_with(
+            api_key="openrouter-key",
+            base_url="https://openrouter.ai/api/v1",
+            default_headers={
+                "HTTP-Referer": "https://example.com",
+                "X-OpenRouter-Title": "Example App",
+            },
+        )
+        self.assertEqual(
+            fake_completions.kwargs,
+            {
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "Say hello"}],
+            },
+        )
+        self.assertEqual(result, "helloopenrouter")
+
+    def test_unknown_provider_returns_clear_error(self):
+        config.app["llm_provider"] = "unknown-provider"
+
+        result = llm._generate_response("test")
+
+        self.assertIn("Error:", result)
+        self.assertIn("unsupported llm provider: unknown-provider", result)
+        self.assertNotIn("api_key", result)
 
     def _use_qwen_provider(self):
         config.app["llm_provider"] = "qwen"

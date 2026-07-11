@@ -84,6 +84,161 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(final_paths, [expected])
         self.assertEqual(generate_video.call_args.kwargs["output_file"], expected)
 
+    def test_cover_generation_prefers_edited_video_subject_over_source_title(self):
+        params = VideoParams(
+            video_subject="Edited Video Subject",
+            source_title="Captured URL Title",
+            source_cover_image_url="https://example.com/cover.jpg",
+            video_script="ready script",
+            video_terms=["term"],
+            video_count=1,
+            generate_video_cover=True,
+        )
+
+        with tempfile.TemporaryDirectory() as task_dir:
+            with (
+                patch.object(tm.utils, "task_dir", return_value=task_dir),
+                patch.object(tm, "generate_script", return_value="ready script"),
+                patch.object(tm, "generate_terms", return_value=["term"]),
+                patch.object(
+                    tm, "generate_audio", return_value=("audio.mp3", 1.0, object())
+                ),
+                patch.object(tm, "generate_subtitle", return_value="subtitle.srt"),
+                patch.object(tm, "get_video_materials", return_value=["material.mp4"]),
+                patch.object(
+                    tm,
+                    "generate_final_videos",
+                    return_value=(["final.mp4"], ["combined.mp4"]),
+                ),
+                patch.object(tm.cover, "generate_ai_video_cover", return_value=""),
+                patch.object(
+                    tm.cover,
+                    "generate_video_cover",
+                    return_value=os.path.join(task_dir, "cover.jpg"),
+                ) as generate_cover,
+                patch.object(
+                    tm.upload_post.upload_post_service,
+                    "is_configured",
+                    return_value=False,
+                ),
+                patch.object(tm.sm.state, "update_task"),
+            ):
+                tm.start("task-id", params)
+
+        self.assertEqual(generate_cover.call_args.kwargs["title"], "Edited Video Subject")
+
+    def test_ai_cover_failure_uses_source_image_fallback_and_skips_title_card(self):
+        params = VideoParams(
+            video_subject="Edited Video Subject",
+            source_title="Captured URL Title",
+            source_cover_image_url="https://example.com/cover.jpg",
+            video_script="ready script",
+            video_terms=["term"],
+            video_count=1,
+            generate_video_cover=True,
+            cover_generation_provider="openrouter",
+        )
+
+        with tempfile.TemporaryDirectory() as task_dir:
+            with (
+                patch.object(tm.utils, "task_dir", return_value=task_dir),
+                patch.object(tm, "generate_script", return_value="ready script"),
+                patch.object(tm, "generate_terms", return_value=["term"]),
+                patch.object(
+                    tm, "generate_audio", return_value=("audio.mp3", 1.0, object())
+                ),
+                patch.object(tm, "generate_subtitle", return_value="subtitle.srt"),
+                patch.object(tm, "get_video_materials", return_value=["material.mp4"]),
+                patch.object(
+                    tm,
+                    "generate_final_videos",
+                    return_value=(["final.mp4"], ["combined.mp4"]),
+                ),
+                patch.object(
+                    tm.cover,
+                    "generate_ai_video_cover",
+                    side_effect=ValueError("No model found"),
+                ),
+                patch.object(
+                    tm.cover,
+                    "generate_video_cover",
+                    return_value=os.path.join(task_dir, "cover.jpg"),
+                ) as generate_cover,
+                patch.object(
+                    tm.cover,
+                    "generate_title_card_cover",
+                ) as generate_title_card,
+                patch.object(
+                    tm.upload_post.upload_post_service,
+                    "is_configured",
+                    return_value=False,
+                ),
+                patch.object(tm.sm.state, "update_task"),
+            ):
+                result = tm.start("task-id", params)
+
+        self.assertEqual(
+            generate_cover.call_args.kwargs["source_image_ref"],
+            "https://example.com/cover.jpg",
+        )
+        self.assertEqual(
+            generate_cover.call_args.kwargs["title"], "Edited Video Subject"
+        )
+        generate_title_card.assert_not_called()
+        self.assertEqual(result["cover_error"], "No model found")
+
+    def test_start_shortens_script_when_tts_audio_exceeds_target_duration(self):
+        params = VideoParams(
+            video_subject="Long Article",
+            video_script="original long script",
+            video_terms=["term"],
+            video_duration_minutes=3,
+            video_source="local",
+            generate_video_cover=False,
+        )
+
+        generated_audio = [
+            ("audio.mp3", 600.0, object()),
+            ("audio.mp3", 175.0, object()),
+        ]
+
+        with tempfile.TemporaryDirectory() as task_dir:
+            with (
+                patch.object(tm.utils, "task_dir", return_value=task_dir),
+                patch.object(tm, "generate_script", return_value="original long script"),
+                patch.object(
+                    tm, "generate_audio", side_effect=generated_audio
+                ) as generate_audio,
+                patch.object(
+                    tm.llm,
+                    "shorten_script_to_duration",
+                    return_value="short script",
+                ) as shorten_script,
+                patch.object(tm, "generate_subtitle", return_value="subtitle.srt") as generate_subtitle,
+                patch.object(tm, "get_video_materials", return_value=["material.mp4"]),
+                patch.object(
+                    tm,
+                    "generate_final_videos",
+                    return_value=(["final.mp4"], ["combined.mp4"]),
+                ),
+                patch.object(
+                    tm.upload_post.upload_post_service,
+                    "is_configured",
+                    return_value=False,
+                ),
+                patch.object(tm.sm.state, "update_task"),
+            ):
+                tm.start("task-id", params)
+
+        self.assertEqual(generate_audio.call_count, 2)
+        shorten_script.assert_called_once_with(
+            video_script="original long script",
+            video_duration_minutes=3,
+            script_style=params.script_style,
+        )
+        generate_subtitle.assert_called_once()
+        self.assertEqual(generate_subtitle.call_args.args[2], "short script")
+
     def test_generate_script_fetches_url_content_and_derives_subject(self):
         params = VideoParams(
             source_url="https://example.com/story",
@@ -124,6 +279,44 @@ class TestTaskService(unittest.TestCase):
             source_title="Example Story",
             source_url="https://example.com/story",
         )
+
+    def test_generate_script_resolves_source_metadata_for_existing_script(self):
+        params = VideoParams(
+            source_url="https://example.com/story",
+            video_script="A ready-made script.",
+            video_subject="",
+            source_title="",
+            source_cover_image_url="",
+        )
+        source_meta = tm.content_source.SourceContent(
+            source_type="article",
+            source_url="https://example.com/story",
+            final_url="https://example.com/story?ref=1",
+            title="Example Story",
+            content="",
+            extraction_method="article-metadata",
+            cover_image_url="https://example.com/cover.jpg",
+        )
+
+        with (
+            patch.object(
+                tm.content_source,
+                "fetch_source_metadata",
+                return_value=source_meta,
+            ) as fetch_source_metadata,
+            patch.object(tm.llm, "generate_script") as generate,
+        ):
+            result = tm.generate_script("task-id", params)
+
+        self.assertEqual(result, "A ready-made script.")
+        self.assertEqual(params.source_title, "Example Story")
+        self.assertEqual(params.source_cover_image_url, "https://example.com/cover.jpg")
+        self.assertEqual(params.source_url, "https://example.com/story?ref=1")
+        self.assertEqual(params.video_subject, "Example Story")
+        fetch_source_metadata.assert_called_once_with(
+            params.source_type, "https://example.com/story"
+        )
+        generate.assert_not_called()
 
     def test_generate_terms_uses_script_order_mode_when_enabled(self):
         """

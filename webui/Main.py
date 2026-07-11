@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import webbrowser
 from uuid import UUID, uuid4
 
@@ -16,6 +17,7 @@ if root_dir not in sys.path:
     print("")
 
 from app.config import config
+from app.models import const
 from app.models.schema import (
     MaterialInfo,
     ScriptStyle,
@@ -25,6 +27,7 @@ from app.models.schema import (
     VideoTransitionMode,
 )
 from app.services import article, content_source, dialogue, llm, voice
+from app.services import state as sm
 from app.services import task as tm
 from app.utils import utils
 
@@ -85,6 +88,10 @@ if "ui_language" not in st.session_state:
 if "local_video_materials" not in st.session_state:
     # 记住用户最近一次已经落盘的本地素材，避免仅修改文案后二次生成时丢失素材列表。
     st.session_state["local_video_materials"] = []
+if "active_video_task_id" not in st.session_state:
+    st.session_state["active_video_task_id"] = ""
+if "active_video_task_folder_opened" not in st.session_state:
+    st.session_state["active_video_task_folder_opened"] = False
 
 # 加载语言文件
 locales = utils.load_locales(i18n_dir)
@@ -146,6 +153,24 @@ def get_all_songs():
             if file.endswith(".mp3"):
                 songs.append(file)
     return songs
+
+
+def get_model_presets(config_key: str, default_presets: list[str]) -> list[tuple[str, str]]:
+    raw_presets = config.app.get(config_key, default_presets)
+    if isinstance(raw_presets, str):
+        raw_presets = [raw_presets]
+    if not isinstance(raw_presets, list):
+        raw_presets = default_presets
+
+    presets = [("Custom", "")]
+    seen = set()
+    for preset in raw_presets:
+        model_name = str(preset or "").strip()
+        if not model_name or model_name in seen:
+            continue
+        presets.append((model_name, model_name))
+        seen.add(model_name)
+    return presets
 
 
 def open_task_folder(task_id):
@@ -224,12 +249,18 @@ locales = utils.load_locales(i18n_dir)
 
 
 def tr(key):
-    loc = locales.get(st.session_state["ui_language"], {})
+    ui_language = st.session_state.get(
+        "ui_language", config.ui.get("language", system_locale)
+    )
+    if "ui_language" not in st.session_state:
+        st.session_state["ui_language"] = ui_language
+    loc = locales.get(ui_language, {})
     return loc.get("Translation", {}).get(key, key)
 
 
 def generate_script_from_source_url():
     """Populate the subject and script fields from the selected source URL."""
+    _clear_generated_script_state()
     source_type = st.session_state.get("source_type", content_source.SOURCE_ARTICLE)
     source_url = st.session_state.get("source_url", "").strip()
     st.session_state["article_url_generation_error"] = ""
@@ -280,10 +311,26 @@ def generate_script_from_source_url():
         st.session_state["video_subject"] = subject
         st.session_state["video_script"] = script
         st.session_state["source_url"] = resolved_source_url
+        st.session_state["source_title"] = resolved_source.title
+        st.session_state["source_cover_image_url"] = resolved_source.cover_image_url
         st.session_state["source_extraction_method"] = resolved_source.extraction_method
         st.session_state["article_url_generation_success"] = True
     except Exception as exc:
         st.session_state["article_url_generation_error"] = str(exc)
+
+
+def _clear_generated_script_state():
+    """Drop previously generated outputs before running a fresh source import."""
+    for key in (
+        "video_script",
+        "video_terms",
+        "source_title",
+        "source_cover_image_url",
+        "source_extraction_method",
+        "article_url_generation_error",
+        "article_url_generation_success",
+    ):
+        st.session_state.pop(key, None)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -316,6 +363,45 @@ def get_groq_model_ids(api_key: str, base_url: str) -> list[str]:
         return sorted(set(model_ids))
     except Exception as e:
         logger.warning(f"failed to fetch groq models: {e}")
+        return []
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_openrouter_image_model_ids(
+    api_key: str,
+    base_url: str,
+    http_referer: str,
+    app_title: str,
+) -> list[str]:
+    if not api_key:
+        return []
+
+    normalized_base_url = (
+        (base_url or "https://openrouter.ai/api/v1").strip().rstrip("/")
+    )
+    models_url = f"{normalized_base_url}/images/models"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    if http_referer:
+        headers["HTTP-Referer"] = http_referer
+    if app_title:
+        headers["X-OpenRouter-Title"] = app_title
+
+    try:
+        response = requests.get(models_url, headers=headers, timeout=10)
+        response.raise_for_status()
+        payload = response.json()
+        data = payload.get("data", [])
+
+        model_ids = []
+        for item in data:
+            if isinstance(item, dict):
+                model_id = item.get("id")
+                if isinstance(model_id, str) and model_id.strip():
+                    model_ids.append(model_id.strip())
+
+        return sorted(set(model_id for model_id in model_ids if model_id != "openrouter/auto"))
+    except Exception as e:
+        logger.warning(f"failed to fetch OpenRouter image models: {e}")
         return []
 
 
@@ -354,6 +440,7 @@ if not config.app.get("hide_config", False):
                 aihubmix_label = "AIHubMix（推荐）"
             llm_provider_options = [
                 ("OpenAI", "openai"),
+                ("OpenRouter", "openrouter"),
                 (aihubmix_label, "aihubmix"),
                 ("AIML API", "aimlapi"),
                 ("Moonshot", "moonshot"),
@@ -401,6 +488,8 @@ if not config.app.get("hide_config", False):
             llm_base_url = config.app.get(f"{llm_provider}_base_url", "")
             llm_model_name = config.app.get(f"{llm_provider}_model_name", "")
             llm_account_id = config.app.get(f"{llm_provider}_account_id", "")
+            llm_http_referer = config.app.get(f"{llm_provider}_http_referer", "")
+            llm_app_title = config.app.get(f"{llm_provider}_app_title", "")
 
             tips = ""
             if llm_provider == "ollama":
@@ -432,6 +521,26 @@ if not config.app.get("hide_config", False):
                             - **API Key**: [点击到官网申请](https://platform.openai.com/api-keys)
                             - **Base Url**: 官方 OpenAI 可留空；如果使用 OpenAI 兼容供应商（例如 OpenRouter），请填写对应的兼容接口地址
                             - **Model Name**: 填写**有权限**的模型；如果使用兼容供应商，请填写该平台支持的模型 ID
+                            """
+
+            if llm_provider == "openrouter":
+                if not llm_model_name:
+                    llm_model_name = "openai/gpt-4o-mini"
+                if not llm_base_url:
+                    llm_base_url = "https://openrouter.ai/api/v1"
+                if not llm_http_referer:
+                    llm_http_referer = "https://github.com/harry0703/MoneyPrinterTurbo"
+                if not llm_app_title:
+                    llm_app_title = "MoneyPrinterTurbo"
+                with llm_helper:
+                    tips = """
+                            ##### OpenRouter 配置说明
+                            > [OpenRouter](https://openrouter.ai/) 提供 OpenAI-compatible API，可在一个接口里访问多家模型。
+                            - **API Key**: [点击到 OpenRouter 创建密钥](https://openrouter.ai/settings/keys)
+                            - **Base Url**: 固定为 https://openrouter.ai/api/v1
+                            - **Model Name**: 例如 `openai/gpt-4o-mini`、`anthropic/claude-3.5-sonnet`、`google/gemini-2.5-flash`
+                            - **HTTP Referer**: 可填写你的站点或项目主页，用于 OpenRouter 统计与归属
+                            - **App Title**: 可填写应用名称，会作为请求标识发送给 OpenRouter
                             """
 
             if llm_provider == "aihubmix":
@@ -698,6 +807,19 @@ if not config.app.get("hide_config", False):
                 config.app[f"{llm_provider}_base_url"] = st_llm_base_url
             if st_llm_model_name:
                 config.app[f"{llm_provider}_model_name"] = st_llm_model_name
+            if llm_provider == "openrouter":
+                st_llm_http_referer = st.text_input(
+                    "HTTP Referer",
+                    value=llm_http_referer,
+                )
+                st_llm_app_title = st.text_input(
+                    "App Title",
+                    value=llm_app_title,
+                )
+                if st_llm_http_referer:
+                    config.app[f"{llm_provider}_http_referer"] = st_llm_http_referer
+                if st_llm_app_title:
+                    config.app[f"{llm_provider}_app_title"] = st_llm_app_title
             if llm_provider == "ernie":
                 st_llm_secret_key = st.text_input(
                     tr("Secret Key"), value=llm_secret_key, type="password"
@@ -887,10 +1009,12 @@ with left_panel:
         if st.button(
             tr("Generate Video Script and Keywords"), key="auto_generate_script"
         ):
+            _clear_generated_script_state()
             with st.spinner(tr("Generating Video Script and Keywords")):
                 try:
                     source_content = ""
                     source_title = ""
+                    source_cover_image_url = ""
                     resolved_source_url = params.source_url
                     effective_subject = params.video_subject
                     if params.source_url:
@@ -900,6 +1024,7 @@ with left_panel:
                         source_content = resolved_source.content
                         source_title = resolved_source.title
                         resolved_source_url = resolved_source.final_url
+                        source_cover_image_url = resolved_source.cover_image_url
                         effective_subject = (
                             effective_subject or source_title or resolved_source_url
                         )
@@ -932,6 +1057,11 @@ with left_panel:
                 else:
                     st.session_state["video_script"] = script
                     st.session_state["video_terms"] = ", ".join(terms)
+                    st.session_state["source_title"] = source_title
+                    st.session_state["source_cover_image_url"] = source_cover_image_url
+                    params.source_title = source_title
+                    params.source_cover_image_url = source_cover_image_url
+                    params.source_url = resolved_source_url
         params.video_script = st.text_area(
             tr("Video Script"), key="video_script", height=280
         )
@@ -1056,6 +1186,37 @@ with middle_panel:
         )
         params.video_aspect = VideoAspect(video_aspect_ratios[selected_index][1])
 
+        video_layout_styles = [
+            (tr("Full Screen Video"), "full"),
+            (tr("News Card Video"), "news_card"),
+        ]
+        saved_video_layout_style = str(
+            config.app.get("video_layout_style", "full")
+        ).lower()
+        saved_video_layout_index = 0
+        for i, (_, style_id) in enumerate(video_layout_styles):
+            if style_id == saved_video_layout_style:
+                saved_video_layout_index = i
+                break
+        selected_video_layout_index = st.selectbox(
+            tr("Video Layout Style"),
+            options=range(len(video_layout_styles)),
+            format_func=lambda x: video_layout_styles[x][0],
+            index=saved_video_layout_index,
+            help=tr("Video Layout Style Help"),
+        )
+        params.video_layout_style = video_layout_styles[selected_video_layout_index][1]
+        config.app["video_layout_style"] = params.video_layout_style
+        if params.video_layout_style == "news_card":
+            params.news_card_background_color = st.color_picker(
+                tr("News Card Background Color"),
+                value=str(config.app.get("news_card_background_color", "#CBEFF7")),
+                help=tr("News Card Background Color Help"),
+            )
+            config.app["news_card_background_color"] = (
+                params.news_card_background_color
+            )
+
         params.video_clip_duration = st.selectbox(
             tr("Clip Duration"), options=[2, 3, 4, 5, 6, 7, 8, 9, 10], index=1
         )
@@ -1063,6 +1224,7 @@ with middle_panel:
             tr("Number of Videos Generated Simultaneously"),
             options=[1, 2, 3, 4, 5],
             index=0,
+            key="video_count_input",
         )
 
         with st.expander(tr("Advanced Video Settings"), expanded=False):
@@ -1081,6 +1243,139 @@ with middle_panel:
                 help=tr("Generate Video Cover Help"),
                 key="generate_video_cover",
             )
+            cover_provider_options = [
+                (tr("Cover Provider Local"), "local"),
+                (tr("Cover Provider OpenRouter"), "openrouter"),
+                (tr("Cover Provider OpenAI"), "openai"),
+            ]
+            saved_cover_provider = str(
+                config.app.get("cover_generation_provider", "local")
+            ).lower()
+            saved_cover_provider_index = 0
+            for i, (_, provider_id) in enumerate(cover_provider_options):
+                if provider_id == saved_cover_provider:
+                    saved_cover_provider_index = i
+                    break
+            selected_cover_provider = st.selectbox(
+                tr("Cover Generation Provider"),
+                options=range(len(cover_provider_options)),
+                format_func=lambda x: cover_provider_options[x][0],
+                index=saved_cover_provider_index,
+                help=tr("Cover Generation Provider Help"),
+                key="cover_generation_provider",
+                disabled=not params.generate_video_cover,
+            )
+            params.cover_generation_provider = cover_provider_options[
+                selected_cover_provider
+            ][1]
+            config.app["cover_generation_provider"] = params.cover_generation_provider
+
+            openai_image_model_presets = get_model_presets(
+                "openai_image_model_presets",
+                ["gpt-image-1"],
+            )
+            saved_openai_image_model = str(
+                config.app.get("openai_image_model_name", "")
+            ).strip()
+            saved_openai_preset_index = 0
+            for i, (_, model_name) in enumerate(openai_image_model_presets):
+                if model_name and model_name == saved_openai_image_model:
+                    saved_openai_preset_index = i
+                    break
+
+            selected_openai_preset = st.selectbox(
+                tr("OpenAI Image Model Preset"),
+                options=range(len(openai_image_model_presets)),
+                format_func=lambda x: openai_image_model_presets[x][0],
+                index=saved_openai_preset_index,
+                help=tr("OpenAI Image Model Preset Help"),
+                disabled=not params.generate_video_cover,
+            )
+            openai_image_model_name = openai_image_model_presets[
+                selected_openai_preset
+            ][1]
+            if not openai_image_model_name:
+                openai_image_model_name = st.text_input(
+                    tr("OpenAI Image Model Name"),
+                    value=saved_openai_image_model,
+                    help=tr("OpenAI Image Model Name Help"),
+                    disabled=not params.generate_video_cover,
+                ).strip()
+            if openai_image_model_name:
+                config.app["openai_image_model_name"] = openai_image_model_name
+
+            openrouter_image_model_ids = get_openrouter_image_model_ids(
+                api_key=str(config.app.get("openrouter_api_key", "")).strip(),
+                base_url=str(
+                    config.app.get("openrouter_base_url", "https://openrouter.ai/api/v1")
+                ).strip(),
+                http_referer=str(config.app.get("openrouter_http_referer", "")).strip(),
+                app_title=str(config.app.get("openrouter_app_title", "")).strip(),
+            )
+            openrouter_image_model_presets = [("Custom", "")]
+            if openrouter_image_model_ids:
+                openrouter_image_model_presets.extend(
+                    (model_id, model_id) for model_id in openrouter_image_model_ids
+                )
+            else:
+                openrouter_image_model_presets.extend(
+                    [
+                        ("openai/gpt-image-1", "openai/gpt-image-1"),
+                        ("openai/gpt-image-2", "openai/gpt-image-2"),
+                        (
+                            "black-forest-labs/flux.2-klein-4b",
+                            "black-forest-labs/flux.2-klein-4b",
+                        ),
+                        ("black-forest-labs/flux.2-pro", "black-forest-labs/flux.2-pro"),
+                        ("google/gemini-2.5-flash-image", "google/gemini-2.5-flash-image"),
+                        (
+                            "google/gemini-2.5-flash-image-preview",
+                            "google/gemini-2.5-flash-image-preview",
+                        ),
+                    ]
+                )
+            saved_openrouter_image_model = str(
+                config.app.get("openrouter_image_model_name", "")
+            ).strip()
+            if (
+                saved_openrouter_image_model == "openrouter/auto"
+                or (
+                    openrouter_image_model_ids
+                    and saved_openrouter_image_model
+                    and saved_openrouter_image_model not in openrouter_image_model_ids
+                )
+            ):
+                st.warning(
+                    f'Current OpenRouter image model "{saved_openrouter_image_model}" is not supported by the live OpenRouter images API. Switched to "google/gemini-2.5-flash-image".'
+                )
+                saved_openrouter_image_model = "google/gemini-2.5-flash-image"
+                config.app["openrouter_image_model_name"] = saved_openrouter_image_model
+            saved_openrouter_preset_index = 0
+            for i, (_, model_name) in enumerate(openrouter_image_model_presets):
+                if model_name and model_name == saved_openrouter_image_model:
+                    saved_openrouter_preset_index = i
+                    break
+
+            selected_openrouter_preset = st.selectbox(
+                tr("OpenRouter Image Model Preset"),
+                options=range(len(openrouter_image_model_presets)),
+                format_func=lambda x: openrouter_image_model_presets[x][0],
+                index=saved_openrouter_preset_index,
+                help=tr("OpenRouter Image Model Preset Help"),
+                disabled=not params.generate_video_cover,
+            )
+            openrouter_image_model_name = openrouter_image_model_presets[
+                selected_openrouter_preset
+            ][1]
+            if not openrouter_image_model_name:
+                openrouter_image_model_name = st.text_input(
+                    tr("OpenRouter Image Model Name"),
+                    value=saved_openrouter_image_model,
+                    help=tr("OpenRouter Image Model Name Help"),
+                    disabled=not params.generate_video_cover,
+                ).strip()
+            if openrouter_image_model_name:
+                config.app["openrouter_image_model_name"] = openrouter_image_model_name
 
             video_codec_options = [
                 ("libx264 (CPU)", "libx264"),
@@ -1178,13 +1473,16 @@ with middle_panel:
         saved_voice_name = config.ui.get("voice_name", "")
         saved_voice_name_index = 0
 
-        # 检查保存的声音是否在当前筛选的声音列表中
+            # 检查保存的声音是否在当前筛选的声音列表中
         if saved_voice_name in friendly_names:
             saved_voice_name_index = list(friendly_names.keys()).index(saved_voice_name)
         else:
             # 如果不在，则根据当前UI语言选择一个默认声音
+            ui_language = st.session_state.get(
+                "ui_language", config.ui.get("language", system_locale)
+            )
             for i, v in enumerate(filtered_voices):
-                if v.lower().startswith(st.session_state["ui_language"].lower()):
+                if v.lower().startswith(ui_language.lower()):
                     saved_voice_name_index = i
                     break
 
@@ -1646,7 +1944,133 @@ with right_panel:
                     config.save_config()
                     st.success(tr("Coverr API Key deleted successfully"))
 
-start_button = st.button(tr("Generate Video"), use_container_width=True, type="primary")
+def _task_video_files_from_disk(task_id: str) -> list[str]:
+    task_dir = utils.task_dir(task_id)
+    if not os.path.isdir(task_dir):
+        return []
+
+    video_files = []
+    for file_name in os.listdir(task_dir):
+        file_path = os.path.join(task_dir, file_name)
+        if (
+            file_name.startswith("final-")
+            and file_name.endswith(".mp4")
+            and os.path.isfile(file_path)
+            and os.path.getsize(file_path) > 0
+        ):
+            video_files.append(file_path)
+    return sorted(video_files)
+
+
+def _task_cover_image_from_disk(task_id: str) -> str:
+    cover_image = os.path.join(utils.task_dir(task_id), "cover.jpg")
+    if os.path.isfile(cover_image) and os.path.getsize(cover_image) > 0:
+        return cover_image
+    return ""
+
+
+def _find_latest_completed_video_task() -> tuple[str, list[str], str]:
+    tasks_root = utils.task_dir()
+    if not os.path.isdir(tasks_root):
+        return "", [], ""
+
+    candidates = []
+    for entry in os.scandir(tasks_root):
+        if not entry.is_dir():
+            continue
+        video_files = _task_video_files_from_disk(entry.name)
+        if not video_files:
+            continue
+        latest_mtime = max(os.path.getmtime(video_file) for video_file in video_files)
+        candidates.append((latest_mtime, entry.name, video_files))
+
+    if not candidates:
+        return "", [], ""
+
+    _, task_id, video_files = max(candidates, key=lambda item: item[0])
+    return task_id, video_files, _task_cover_image_from_disk(task_id)
+
+
+def _render_video_outputs(video_files: list[str], cover_image: str = "", cover_error: str = ""):
+    if video_files:
+        player_cols = st.columns(len(video_files) * 2 + 1)
+        for i, url in enumerate(video_files):
+            player_cols[i * 2 + 1].video(url)
+    if cover_image:
+        st.image(cover_image, caption=tr("Generated Video Cover"))
+    if cover_error:
+        st.warning(f"AI cover generation failed: {cover_error}")
+
+
+def render_active_video_task():
+    task_id = st.session_state.get("active_video_task_id", "")
+    if not task_id:
+        return
+
+    task = sm.state.get_task(task_id)
+    if not task:
+        video_files = _task_video_files_from_disk(task_id)
+        if video_files:
+            st.success(tr("Video Generation Completed"))
+            _render_video_outputs(video_files, _task_cover_image_from_disk(task_id))
+            return
+        st.warning("Video task is no longer available in memory.")
+        return
+
+    progress = int(task.get("progress", 0) or 0)
+    progress = max(0, min(progress, 100))
+    state = int(task.get("state", const.TASK_STATE_PROCESSING))
+
+    st.progress(progress, text=f"Generating video... {progress}%")
+
+    if state == const.TASK_STATE_PROCESSING:
+        time.sleep(2)
+        st.rerun()
+
+    if state == const.TASK_STATE_FAILED:
+        st.error(tr("Video Generation Failed"))
+        return
+
+    if state != const.TASK_STATE_COMPLETE:
+        return
+
+    video_files = task.get("videos", []) or []
+    st.success(tr("Video Generation Completed"))
+    try:
+        _render_video_outputs(
+            video_files,
+            task.get("cover_image") or _task_cover_image_from_disk(task_id),
+            task.get("cover_error") or "",
+        )
+    except Exception:
+        pass
+
+    if not st.session_state.get("active_video_task_folder_opened", False):
+        open_task_folder(task_id)
+        st.session_state["active_video_task_folder_opened"] = True
+    logger.info(tr("Video Generation Completed"))
+
+
+render_active_video_task()
+
+if not st.session_state.get("active_video_task_id", ""):
+    latest_task_id, latest_videos, latest_cover = _find_latest_completed_video_task()
+    if latest_task_id and latest_videos:
+        with st.expander("Latest completed video", expanded=False):
+            _render_video_outputs(latest_videos, latest_cover)
+            if st.button("Open latest video folder", use_container_width=True):
+                open_task_folder(latest_task_id)
+
+start_button = st.button(
+    tr("Generate Video"),
+    use_container_width=True,
+    type="primary",
+    disabled=bool(st.session_state.get("active_video_task_id", ""))
+    and (
+        sm.state.get_task(st.session_state.get("active_video_task_id", "")) or {}
+    ).get("state")
+    == const.TASK_STATE_PROCESSING,
+)
 if start_button:
     config.save_config()
     task_id = str(uuid4())
@@ -1719,18 +2143,6 @@ if start_button:
             if m.url:
                 params.video_materials.append(m)
 
-    log_container = st.empty()
-    log_records = []
-
-    def log_received(msg):
-        if config.ui["hide_log"]:
-            return
-        with log_container:
-            log_records.append(msg)
-            st.code("\n".join(log_records))
-
-    logger.add(log_received)
-
     st.toast(tr("Generating Video"))
     logger.info(tr("Start Generating Video"))
     params_for_log = params.model_dump()
@@ -1741,28 +2153,10 @@ if start_button:
     logger.info(utils.to_json(params_for_log))
     scroll_to_bottom()
 
-    result = tm.start(task_id=task_id, params=params)
-    if not result or "videos" not in result:
-        st.error(tr("Video Generation Failed"))
-        logger.error(tr("Video Generation Failed"))
-        scroll_to_bottom()
-        st.stop()
-
-    video_files = result.get("videos", [])
-    st.success(tr("Video Generation Completed"))
-    try:
-        if video_files:
-            player_cols = st.columns(len(video_files) * 2 + 1)
-            for i, url in enumerate(video_files):
-                player_cols[i * 2 + 1].video(url)
-        cover_image = result.get("cover_image")
-        if cover_image:
-            st.image(cover_image, caption=tr("Generated Video Cover"))
-    except Exception:
-        pass
-
-    open_task_folder(task_id)
-    logger.info(tr("Video Generation Completed"))
-    scroll_to_bottom()
+    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=0)
+    utils.run_in_background(tm.start, task_id=task_id, params=params)
+    st.session_state["active_video_task_id"] = task_id
+    st.session_state["active_video_task_folder_opened"] = False
+    st.rerun()
 
 config.save_config()

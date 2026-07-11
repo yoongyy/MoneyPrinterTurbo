@@ -70,6 +70,15 @@ fi
 MPT_WEBUI_PORT="$SELECTED_WEBUI_PORT"
 
 echo "***** WebUI address: http://$MPT_WEBUI_HOST:$MPT_WEBUI_PORT *****"
+
+# macOS will pause or terminate long-running Python/ffmpeg/network work when the
+# machine sleeps. Keep the system awake while the WebUI process is running so a
+# locked screen does not interrupt 5-10 minute video generation jobs.
+if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ "${MPT_PREVENT_SLEEP:-1}" != "0" ] && command -v caffeinate >/dev/null 2>&1; then
+  echo "***** macOS sleep prevention enabled while WebUI is running. Set MPT_PREVENT_SLEEP=0 to disable. *****"
+  set -- caffeinate -disu "$@"
+fi
+
 "$@" run "$CURRENT_DIR/webui/Main.py" \
   --server.address="$MPT_WEBUI_HOST" \
   --server.port="$MPT_WEBUI_PORT" \

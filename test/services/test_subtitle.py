@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # 测试文件直接运行时，也能从仓库根目录导入 app 包。
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -10,6 +11,52 @@ from app.services import subtitle
 
 
 class TestSubtitleService(unittest.TestCase):
+    @patch.object(subtitle.subprocess, "run")
+    @patch.object(subtitle, "_get_model")
+    def test_transcribe_text_converts_non_audio_inputs_for_whisper(
+        self, get_model, run
+    ):
+        class FakeSegment:
+            def __init__(self, text):
+                self.text = text
+
+        class FakeInfo:
+            language = "en"
+            language_probability = 0.99
+
+        class FakeModel:
+            def __init__(self):
+                self.calls = []
+
+            def transcribe(self, audio_file, **kwargs):
+                self.calls.append(audio_file)
+                return [FakeSegment("hello "), FakeSegment("world")], FakeInfo()
+
+        class FakeResult:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        fake_model = FakeModel()
+        get_model.return_value = fake_model
+
+        def fake_run(command, capture_output=True, text=True):
+            Path(command[-1]).write_bytes(b"mp3-audio")
+            return FakeResult()
+
+        run.side_effect = fake_run
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_file = Path(tmp_dir) / "source.mp4"
+            source_file.write_bytes(b"video")
+
+            transcript = subtitle.transcribe_text(str(source_file))
+
+        self.assertEqual(transcript, "hello world")
+        self.assertEqual(len(fake_model.calls), 1)
+        self.assertTrue(fake_model.calls[0].endswith("-whisper.mp3"))
+        run.assert_called_once()
+
     def test_correct_ignores_markdown_separator_lines(self):
         """
         Whisper fallback 校正阶段也必须忽略 `---` 这类不可发声脚本行。

@@ -1,11 +1,14 @@
+import io
 import os
 import random
+import tempfile
 import threading
 from typing import List
 from urllib.parse import urlencode
 
 import requests
 from loguru import logger
+from PIL import Image
 from moviepy.video.io.VideoFileClip import VideoFileClip
 
 from app.config import config
@@ -50,6 +53,216 @@ def get_api_key(cfg_key: str):
     with _api_key_lock:
         _api_key_counter += 1
         return api_keys[_api_key_counter % len(api_keys)]
+
+
+def _aspect_to_pexels_orientation(video_aspect: VideoAspect) -> str:
+    aspect = VideoAspect(video_aspect)
+    return aspect.name
+
+
+def _aspect_to_pixabay_orientation(video_aspect: VideoAspect) -> str:
+    aspect = VideoAspect(video_aspect)
+    if aspect == VideoAspect.landscape:
+        return "horizontal"
+    if aspect == VideoAspect.portrait:
+        return "vertical"
+    return ""
+
+
+def _download_image_to_file(image_url: str, save_dir: str = "") -> str:
+    image_url = str(image_url or "").strip()
+    if not image_url:
+        return ""
+
+    if not save_dir:
+        save_dir = tempfile.mkdtemp(prefix="mpt-cover-")
+    os.makedirs(save_dir, exist_ok=True)
+
+    image_path = os.path.join(save_dir, f"cover-{utils.md5(image_url)}.jpg")
+    if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
+        return image_path
+
+    response = requests.get(
+        image_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        },
+        proxies=config.proxy,
+        verify=_get_tls_verify(),
+        timeout=(30, 60),
+    )
+    response.raise_for_status()
+    with Image.open(io.BytesIO(response.content)) as image:
+        image.convert("RGB").save(image_path, format="JPEG", quality=94, optimize=True)
+    return image_path
+
+
+def search_images_pexels(
+    search_term: str,
+    video_aspect: VideoAspect = VideoAspect.portrait,
+) -> List[str]:
+    api_key = get_api_key("pexels_api_keys")
+    headers = {
+        "Authorization": api_key,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+    }
+    params = {
+        "query": search_term,
+        "per_page": 10,
+        "orientation": _aspect_to_pexels_orientation(video_aspect),
+    }
+    query_url = f"https://api.pexels.com/v1/search?{urlencode(params)}"
+    logger.info(f"searching cover images: {query_url}, with proxies: {config.proxy}")
+
+    try:
+        response = requests.get(
+            query_url,
+            headers=headers,
+            proxies=config.proxy,
+            verify=_get_tls_verify(),
+            timeout=(30, 60),
+        ).json()
+        photos = response.get("photos", [])
+        image_urls = []
+        for photo in photos:
+            src = photo.get("src") or {}
+            image_url = (
+                src.get("large2x")
+                or src.get("large")
+                or src.get("original")
+                or src.get("medium")
+                or src.get("small")
+                or ""
+            )
+            if image_url:
+                image_urls.append(image_url)
+        return image_urls
+    except Exception as e:
+        logger.error(f"search cover images failed: {str(e)}")
+
+    return []
+
+
+def search_images_pixabay(
+    search_term: str,
+    video_aspect: VideoAspect = VideoAspect.portrait,
+) -> List[str]:
+    api_key = get_api_key("pixabay_api_keys")
+    params = {
+        "q": search_term,
+        "image_type": "photo",
+        "per_page": 10,
+        "key": api_key,
+    }
+    orientation = _aspect_to_pixabay_orientation(video_aspect)
+    if orientation:
+        params["orientation"] = orientation
+    query_url = f"https://pixabay.com/api/?{urlencode(params)}"
+    logger.info(f"searching cover images: {query_url}, with proxies: {config.proxy}")
+
+    try:
+        response = requests.get(
+            query_url, proxies=config.proxy, verify=_get_tls_verify(), timeout=(30, 60)
+        ).json()
+        hits = response.get("hits", [])
+        image_urls = []
+        for hit in hits:
+            image_url = (
+                hit.get("largeImageURL")
+                or hit.get("webformatURL")
+                or hit.get("imageURL")
+                or hit.get("previewURL")
+                or ""
+            )
+            if image_url:
+                image_urls.append(image_url)
+        return image_urls
+    except Exception as e:
+        logger.error(f"search cover images failed: {str(e)}")
+
+    return []
+
+
+def _download_coverr_image_from_video(
+    search_term: str,
+    video_aspect: VideoAspect,
+    save_dir: str = "",
+) -> str:
+    videos = search_videos_coverr(
+        search_term=search_term, minimum_duration=1, video_aspect=video_aspect
+    )
+    if not videos:
+        return ""
+
+    if not save_dir:
+        save_dir = tempfile.mkdtemp(prefix="mpt-coverr-")
+    os.makedirs(save_dir, exist_ok=True)
+
+    video_path = save_video(videos[0].url, save_dir=save_dir)
+    if not video_path:
+        return ""
+
+    image_path = os.path.join(save_dir, f"coverr-{utils.md5(video_path)}.jpg")
+    clip = None
+    try:
+        clip = VideoFileClip(video_path)
+        frame = clip.get_frame(0)
+        Image.fromarray(frame).convert("RGB").save(
+            image_path, format="JPEG", quality=94, optimize=True
+        )
+        return image_path
+    except Exception as exc:
+        logger.warning(f"failed to derive coverr cover image: {exc}")
+        return ""
+    finally:
+        if clip is not None:
+            try:
+                clip.close()
+            except Exception:
+                pass
+
+
+def find_stock_cover_image(
+    task_id: str,
+    search_term: str,
+    source: str = "pexels",
+    video_aspect: VideoAspect = VideoAspect.portrait,
+) -> str:
+    query = str(search_term or "").strip()
+    if not query:
+        return ""
+
+    provider_order = []
+    for candidate in (source, "pexels", "pixabay", "coverr"):
+        candidate = str(candidate or "").strip().lower()
+        if candidate and candidate not in provider_order:
+            provider_order.append(candidate)
+
+    task_cover_dir = utils.task_dir(task_id) if task_id else tempfile.mkdtemp(prefix="mpt-cover-")
+    for provider in provider_order:
+        try:
+            if provider == "pexels":
+                image_urls = search_images_pexels(query, video_aspect=video_aspect)
+                for image_url in image_urls:
+                    downloaded = _download_image_to_file(image_url, task_cover_dir)
+                    if downloaded:
+                        return downloaded
+            elif provider == "pixabay":
+                image_urls = search_images_pixabay(query, video_aspect=video_aspect)
+                for image_url in image_urls:
+                    downloaded = _download_image_to_file(image_url, task_cover_dir)
+                    if downloaded:
+                        return downloaded
+            elif provider == "coverr":
+                downloaded = _download_coverr_image_from_video(
+                    query, video_aspect=video_aspect, save_dir=task_cover_dir
+                )
+                if downloaded:
+                    return downloaded
+        except Exception as exc:
+            logger.warning(f"failed to resolve stock cover image via {provider}: {exc}")
+
+    return ""
 
 
 def search_videos_pexels(

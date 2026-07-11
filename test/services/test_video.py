@@ -19,7 +19,7 @@ from app.controllers.manager.base_manager import TaskQueueFullError
 from app.controllers.manager.memory_manager import InMemoryTaskManager
 from app.controllers.v1 import video as video_controller
 from app.models import const
-from app.models.schema import MaterialInfo
+from app.models.schema import MaterialInfo, VideoParams
 from app.services import state as sm
 from app.services import video as vd
 from app.utils import utils
@@ -181,6 +181,47 @@ class TestVideoService(unittest.TestCase):
         """
         with tempfile.NamedTemporaryFile(suffix=".mp3") as temp_bgm:
             self.assertEqual(vd.get_bgm_file(bgm_file=temp_bgm.name), "")
+
+    def test_news_card_layout_prefers_video_subject_over_source_title(self):
+        params = VideoParams(
+            video_subject="Edited Video Subject",
+            source_title="Captured URL Title",
+        )
+        captured_text = []
+
+        class FakeClip:
+            duration = 1
+            w = 1920
+            h = 1080
+
+            def resized(self, new_size):
+                return self
+
+            def with_duration(self, duration):
+                return self
+
+            def with_position(self, position):
+                return self
+
+        def fake_text_clip(text, *args, **kwargs):
+            captured_text.append(text)
+            return FakeClip()
+
+        with (
+            patch.object(vd, "_make_news_card_background", return_value=FakeClip()),
+            patch.object(vd, "_fit_clip_to_box", return_value=FakeClip()),
+            patch.object(vd, "_make_text_image_clip", side_effect=fake_text_clip),
+            patch.object(vd, "CompositeVideoClip", return_value=FakeClip()),
+        ):
+            vd._apply_news_card_layout(
+                video_clip=FakeClip(),
+                params=params,
+                font_path="/tmp/font.ttf",
+                video_width=1080,
+                video_height=1920,
+            )
+
+        self.assertEqual(captured_text, ["Edited Video Subject"])
 
     def test_get_ffmpeg_binary_uses_configured_env_path(self):
         """配置中显式指定 ffmpeg 时，应优先使用该路径。"""
