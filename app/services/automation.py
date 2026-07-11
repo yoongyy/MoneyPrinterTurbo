@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -10,7 +11,7 @@ from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 from loguru import logger
@@ -46,6 +47,19 @@ SOURCE_TYPE_ARTICLE = content_source.SOURCE_ARTICLE
 SOURCE_TYPE_YOUTUBE = content_source.SOURCE_YOUTUBE
 SOURCE_TYPE_TIKTOK = content_source.SOURCE_TIKTOK
 SUPPORTED_CRAWL_MODES = {"links", "yt-dlp", "single"}
+TRACKING_QUERY_KEYS = {
+    "fbclid",
+    "gclid",
+    "mc_cid",
+    "mc_eid",
+    "mkt_tok",
+    "spm",
+    "utm_campaign",
+    "utm_content",
+    "utm_medium",
+    "utm_source",
+    "utm_term",
+}
 VIDEO_PARAM_CONFIG_KEYS = {
     "video_aspect",
     "script_style",
@@ -143,6 +157,18 @@ class SeenStore:
                 )
                 """
             )
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(seen_sources)").fetchall()
+            }
+            if "content_hash" not in columns:
+                conn.execute("ALTER TABLE seen_sources ADD COLUMN content_hash TEXT")
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_seen_sources_content_hash
+                ON seen_sources(content_hash)
+                """
+            )
 
     def has_success(self, url: str) -> bool:
         normalized = normalize_url(url)
@@ -160,9 +186,74 @@ class SeenStore:
             ).fetchone()
         if not row:
             return False
-        if row[0] == "complete":
+        if row[0] in {"complete", "processing", "duplicate"}:
             return True
         return not retry_failed
+
+    def reserve(
+        self,
+        url: str,
+        title: str = "",
+        retry_failed: bool = False,
+        content_hash: str = "",
+    ) -> bool:
+        normalized = normalize_url(url)
+        if not normalized:
+            return False
+
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status FROM seen_sources WHERE url = ?", (normalized,)
+            ).fetchone()
+            if row:
+                status = row[0]
+                if status == "failed" and retry_failed:
+                    conn.execute(
+                        """
+                        UPDATE seen_sources
+                        SET status = ?, title = ?, error = ?, content_hash = ?,
+                            updated_at = ?
+                        WHERE url = ?
+                        """,
+                        ("processing", title, "", content_hash, now, normalized),
+                    )
+                    return True
+                return False
+
+            conn.execute(
+                """
+                INSERT INTO seen_sources (
+                    url, status, title, task_id, ready_dir, error, created_at,
+                    updated_at, content_hash
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (normalized, "processing", title, "", "", "", now, now, content_hash),
+            )
+            return True
+
+    def has_content_hash(self, content_hash: str, retry_failed: bool = False) -> bool:
+        value = (content_hash or "").strip()
+        if not value:
+            return False
+
+        if retry_failed:
+            statuses = ("complete", "processing", "duplicate")
+        else:
+            statuses = ("complete", "processing", "duplicate", "failed")
+        placeholders = ",".join("?" for _ in statuses)
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT 1 FROM seen_sources
+                WHERE content_hash = ? AND status IN ({placeholders})
+                LIMIT 1
+                """,
+                (value, *statuses),
+            ).fetchone()
+        return bool(row)
 
     def upsert(
         self,
@@ -172,25 +263,61 @@ class SeenStore:
         task_id: str = "",
         ready_dir: str = "",
         error: str = "",
+        content_hash: str = "",
     ) -> None:
         normalized = normalize_url(url)
+        if not normalized:
+            return
         now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO seen_sources (
-                    url, status, title, task_id, ready_dir, error, created_at, updated_at
+                    url, status, title, task_id, ready_dir, error, created_at,
+                    updated_at, content_hash
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(url) DO UPDATE SET
                     status = excluded.status,
                     title = excluded.title,
                     task_id = excluded.task_id,
                     ready_dir = excluded.ready_dir,
                     error = excluded.error,
+                    content_hash = COALESCE(NULLIF(excluded.content_hash, ''), seen_sources.content_hash),
                     updated_at = excluded.updated_at
                 """,
-                (normalized, status, title, task_id, ready_dir, error, now, now),
+                (
+                    normalized,
+                    status,
+                    title,
+                    task_id,
+                    ready_dir,
+                    error,
+                    now,
+                    now,
+                    content_hash,
+                ),
+            )
+
+    def upsert_many(
+        self,
+        urls: list[str],
+        status: str,
+        title: str = "",
+        task_id: str = "",
+        ready_dir: str = "",
+        error: str = "",
+        content_hash: str = "",
+    ) -> None:
+        for url in _unique_urls(urls):
+            self.upsert(
+                url=url,
+                status=status,
+                title=title,
+                task_id=task_id,
+                ready_dir=ready_dir,
+                error=error,
+                content_hash=content_hash,
             )
 
 
@@ -249,16 +376,55 @@ def normalize_url(url: str) -> str:
     parsed = urlparse((url or "").strip())
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return (url or "").strip()
+    query_items = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.lower() not in TRACKING_QUERY_KEYS
+        and not key.lower().startswith("utm_")
+    ]
+    query = urlencode(sorted(query_items), doseq=True)
     return urlunparse(
         (
             parsed.scheme.lower(),
             parsed.netloc.lower(),
-            parsed.path or "/",
+            (parsed.path or "/").rstrip("/") or "/",
             parsed.params,
-            parsed.query,
+            query,
             "",
         )
     )
+
+
+def _unique_urls(urls: list[str]) -> list[str]:
+    result = []
+    seen = set()
+    for url in urls:
+        normalized = normalize_url(url)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
+def _source_urls(source: content_source.SourceContent, candidate_url: str = "") -> list[str]:
+    return _unique_urls(
+        [
+            candidate_url,
+            source.source_url,
+            source.final_url,
+        ]
+    )
+
+
+def source_content_hash(source: content_source.SourceContent) -> str:
+    content = re.sub(r"\s+", " ", source.content or "").strip().lower()
+    title = re.sub(r"\s+", " ", source.title or "").strip().lower()
+    if not content and not title:
+        return ""
+    digest_text = content[:50_000] if content else title
+    digest_source = f"{source.source_type}\n{digest_text}"
+    return hashlib.sha256(digest_source.encode("utf-8")).hexdigest()
 
 
 def _config_bool(key: str, default: bool = False) -> bool:
@@ -760,6 +926,8 @@ def generate_video_for_source(
     validated: ValidatedSource,
     selected_reason: str,
     store: SeenStore,
+    source_urls: list[str],
+    content_hash: str,
 ) -> AutomationRunResult:
     params = _build_video_params(validated)
     task_id = utils.get_uuid()
@@ -774,7 +942,14 @@ def generate_video_for_source(
     task_state = sm.state.get_task(task_id) or {}
     if task_state.get("state") == const.TASK_STATE_FAILED or not task_result.get("videos"):
         error = "video generation failed"
-        store.upsert(validated.source.final_url, "failed", validated.title, task_id, error=error)
+        store.upsert_many(
+            source_urls,
+            "failed",
+            validated.title,
+            task_id,
+            error=error,
+            content_hash=content_hash,
+        )
         return AutomationRunResult(
             success=False,
             task_id=task_id,
@@ -789,12 +964,13 @@ def generate_video_for_source(
         task_result=task_result,
         selected_reason=selected_reason,
     )
-    store.upsert(
-        validated.source.final_url,
+    store.upsert_many(
+        source_urls,
         "complete",
         validated.title,
         task_id,
         str(ready_dir),
+        content_hash=content_hash,
     )
     return AutomationRunResult(
         success=True,
@@ -827,19 +1003,84 @@ def run_once() -> AutomationRunResult:
         selection = select_candidate_with_ai(remaining)
         candidate = selection.candidate
         attempted_urls.add(candidate.url)
+        retry_failed = _config_bool("automation_retry_failed_sources", False)
+        if not store.reserve(candidate.url, candidate.title, retry_failed=retry_failed):
+            logger.info(f"skip already-seen automation source: {candidate.url}")
+            remaining = [item for item in remaining if item.url not in attempted_urls]
+            if not remaining:
+                break
+            continue
+        current_source_urls = [candidate.url]
+        current_content_hash = ""
         try:
             logger.info(f"selected automation source: {candidate.title or candidate.url}")
             source = content_source.fetch_source_content(candidate.source_type, candidate.url)
+            source_urls = _source_urls(source, candidate.url)
+            current_source_urls = source_urls
+            duplicate_url = next(
+                (
+                    url
+                    for url in source_urls
+                    if url != normalize_url(candidate.url)
+                    and store.should_skip(url, retry_failed=retry_failed)
+                ),
+                "",
+            )
+            if duplicate_url:
+                last_error = f"duplicate source URL already processed: {duplicate_url}"
+                logger.info(last_error)
+                store.upsert_many(
+                    source_urls,
+                    "duplicate",
+                    source.title or candidate.title,
+                    error=last_error,
+                )
+                remaining = [item for item in remaining if item.url not in attempted_urls]
+                if not remaining:
+                    break
+                continue
+
+            content_hash = source_content_hash(source)
+            current_content_hash = content_hash
+            if store.has_content_hash(content_hash, retry_failed=retry_failed):
+                last_error = "duplicate source content already processed"
+                logger.info(last_error)
+                store.upsert_many(
+                    source_urls,
+                    "duplicate",
+                    source.title or candidate.title,
+                    error=last_error,
+                    content_hash=content_hash,
+                )
+                remaining = [item for item in remaining if item.url not in attempted_urls]
+                if not remaining:
+                    break
+                continue
+
+            store.upsert_many(
+                source_urls,
+                "processing",
+                source.title or candidate.title,
+                content_hash=content_hash,
+            )
             validated = validate_source_with_ai(source)
             return generate_video_for_source(
                 validated=validated,
                 selected_reason=selection.reason,
                 store=store,
+                source_urls=source_urls,
+                content_hash=content_hash,
             )
         except Exception as exc:
             last_error = str(exc)
             logger.warning(f"automation candidate failed, trying another: {last_error}")
-            store.upsert(candidate.url, "failed", candidate.title, error=last_error)
+            store.upsert_many(
+                current_source_urls,
+                "failed",
+                candidate.title,
+                error=last_error,
+                content_hash=current_content_hash,
+            )
             remaining = [item for item in remaining if item.url not in attempted_urls]
             if not remaining:
                 break
