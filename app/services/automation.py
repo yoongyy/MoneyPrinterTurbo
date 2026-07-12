@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import sqlite3
@@ -459,6 +460,17 @@ def _automation_config_value(key: str, default: Any = None) -> Any:
     return config.app.get(key, default)
 
 
+def _automation_config_choice(key: str, default: Any = None) -> Any:
+    value = _automation_config_value(key, default)
+    if not isinstance(value, list):
+        return value
+
+    choices = [item for item in value if str(item or "").strip()]
+    if not choices:
+        return default
+    return random.choice(choices)
+
+
 def _compile_patterns(values: Any) -> list[re.Pattern]:
     if isinstance(values, str):
         values = [values]
@@ -858,14 +870,14 @@ def _build_video_params(validated: ValidatedSource) -> VideoParams:
             or "full"
         ),
         "news_card_background_color": str(
-            _automation_config_value(
+            _automation_config_choice(
                 "automation_news_card_background_color",
                 config.app.get("news_card_background_color", "#CBEFF7"),
             )
             or "#CBEFF7"
         ),
         "voice_name": str(
-            _automation_config_value(
+            _automation_config_choice(
                 "automation_voice_name",
                 config.ui.get("voice_name", "zh-CN-XiaoxiaoNeural-Female"),
             )

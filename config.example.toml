@@ -408,8 +408,14 @@ automation_script_style = "narration"
 automation_video_source = "pexels"
 automation_video_aspect = "9:16"
 automation_video_layout_style = "news_card"
+# May be a single color string or a list. When a list is provided, automation
+# randomly selects one for each run.
 automation_news_card_background_color = "#CBEFF7"
+# automation_news_card_background_color = ["#CBEFF7", "#F8E9A1", "#E8F5E9"]
+# May be a single voice string or a list. When a list is provided, automation
+# randomly selects one for each run.
 automation_voice_name = "zh-CN-XiaoxiaoNeural-Female"
+# automation_voice_name = ["zh-CN-XiaoxiaoNeural-Female", "zh-CN-YunxiNeural-Male"]
 automation_voice_name_2 = ""
 automation_bgm_type = "random"
 automation_bgm_volume = 0.2

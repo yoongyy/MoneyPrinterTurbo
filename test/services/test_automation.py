@@ -168,3 +168,37 @@ def test_build_video_params_allows_automation_cover_provider_override(monkeypatc
     params = automation._build_video_params(validated)
 
     assert params.cover_generation_provider == "local"
+
+
+def test_build_video_params_randomly_selects_color_and_voice(monkeypatch):
+    def pick_last(values):
+        return values[-1]
+
+    monkeypatch.setattr(automation.random, "choice", pick_last)
+    monkeypatch.setitem(
+        automation.config._cfg,
+        "automation",
+        {
+            "automation_news_card_background_color": ["#CBEFF7", "#E8F5E9"],
+            "automation_voice_name": [
+                "zh-CN-XiaoxiaoNeural-Female",
+                "zh-CN-YunxiNeural-Male",
+            ],
+        },
+    )
+    validated = automation.ValidatedSource(
+        source=content_source.SourceContent(
+            source_type="article",
+            source_url="https://example.com/a",
+            final_url="https://example.com/a",
+            title="Source title",
+            content="Article content",
+            extraction_method="article",
+        ),
+        title="Video title",
+    )
+
+    params = automation._build_video_params(validated)
+
+    assert params.news_card_background_color == "#E8F5E9"
+    assert params.voice_name == "zh-CN-YunxiNeural-Male"
