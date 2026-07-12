@@ -191,11 +191,13 @@ def save_config():
                 app[key] = file_app[key]
 
     with open(config_file, "w", encoding="utf-8") as f:
-        _cfg["app"] = app
-        _cfg["azure"] = azure
-        _cfg["siliconflow"] = siliconflow
-        _cfg["ui"] = ui
-        f.write(toml.dumps(_cfg))
+        file_cfg["app"] = app
+        file_cfg["azure"] = azure
+        file_cfg["siliconflow"] = siliconflow
+        file_cfg["ui"] = ui
+        _cfg.clear()
+        _cfg.update(file_cfg)
+        f.write(toml.dumps(file_cfg))
 
 
 _cfg = load_config()

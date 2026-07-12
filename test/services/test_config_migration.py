@@ -109,6 +109,75 @@ class TestUploadPostConfigMigration(unittest.TestCase):
                 config_module.siliconflow = original_state["siliconflow"]
                 config_module.ui = original_state["ui"]
 
+    def test_save_config_preserves_automation_values_from_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.toml"
+            with config_path.open("w", encoding="utf-8") as fp:
+                toml.dump(
+                    {
+                        "app": {"video_source": "pexels"},
+                        "azure": {},
+                        "siliconflow": {},
+                        "ui": {"hide_log": True},
+                        "automation": {
+                            "automation_news_card_background_color": [
+                                "#CBEFF7",
+                                "#E8F5E9",
+                            ],
+                            "automation_voice_name": [
+                                "zh-CN-XiaoxiaoNeural-Female",
+                                "zh-CN-YunxiNeural-Male",
+                            ],
+                        },
+                    },
+                    fp,
+                )
+
+            original_state = {
+                "config_file": config_module.config_file,
+                "_cfg": config_module._cfg,
+                "app": config_module.app,
+                "azure": config_module.azure,
+                "siliconflow": config_module.siliconflow,
+                "ui": config_module.ui,
+            }
+
+            try:
+                config_module.config_file = str(config_path)
+                config_module._cfg = {
+                    "app": {"video_source": "local"},
+                    "azure": {},
+                    "siliconflow": {},
+                    "ui": {"hide_log": False},
+                    "automation": {
+                        "automation_news_card_background_color": "#000000",
+                        "automation_voice_name": "stale-voice",
+                    },
+                }
+                config_module.app = config_module._cfg["app"]
+                config_module.azure = config_module._cfg["azure"]
+                config_module.siliconflow = config_module._cfg["siliconflow"]
+                config_module.ui = config_module._cfg["ui"]
+
+                config_module.save_config()
+
+                saved = toml.load(config_path)
+                self.assertEqual(
+                    saved["automation"]["automation_news_card_background_color"],
+                    ["#CBEFF7", "#E8F5E9"],
+                )
+                self.assertEqual(
+                    saved["automation"]["automation_voice_name"],
+                    ["zh-CN-XiaoxiaoNeural-Female", "zh-CN-YunxiNeural-Male"],
+                )
+            finally:
+                config_module.config_file = original_state["config_file"]
+                config_module._cfg = original_state["_cfg"]
+                config_module.app = original_state["app"]
+                config_module.azure = original_state["azure"]
+                config_module.siliconflow = original_state["siliconflow"]
+                config_module.ui = original_state["ui"]
+
 
 if __name__ == "__main__":
     unittest.main()
