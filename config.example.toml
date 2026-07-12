@@ -415,7 +415,7 @@ automation_news_card_background_color = "#CBEFF7"
 # May be a single voice string or a list. When a list is provided, automation
 # randomly selects one for each run.
 automation_voice_name = "zh-CN-XiaoxiaoNeural-Female"
-# automation_voice_name = ["zh-CN-XiaoxiaoNeural-Female", "zh-CN-YunxiNeural-Male"]
+# automation_voice_name = ["zh-CN-XiaoxiaoNeural-Female", "zh-CN-YunxiNeural-Male", "zh-CN-XiaoyiNeural-Female", "zh-CN-YunyangNeural-Male", "zh-TW-HsiaoChenNeural-Female", "zh-TW-YunJheNeural-Male"]
 automation_voice_name_2 = ""
 automation_bgm_type = "random"
 automation_bgm_volume = 0.2
