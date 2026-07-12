@@ -921,6 +921,13 @@ def _slugify(value: str, max_length: int = 80) -> str:
     return value[:max_length].strip(".-") or "video"
 
 
+def _ready_video_filename(title: str, index: int, total: int, suffix: str) -> str:
+    stem = _slugify(title)
+    sequence = f"-{index}" if total > 1 else ""
+    extension = suffix if suffix else ".mp4"
+    return f"{stem}{sequence}{extension}"
+
+
 def _copy_outputs_to_ready_dir(
     task_id: str,
     validated: ValidatedSource,
@@ -934,12 +941,18 @@ def _copy_outputs_to_ready_dir(
     ready_dir = ready_root / f"{timestamp}-{_slugify(validated.title)}"
     ready_dir.mkdir(parents=True, exist_ok=True)
 
+    video_outputs = task_result.get("videos") or []
     copied_videos = []
-    for index, video_path in enumerate(task_result.get("videos") or [], start=1):
+    for index, video_path in enumerate(video_outputs, start=1):
         source_path = Path(str(video_path))
         if not source_path.is_file():
             continue
-        target_path = ready_dir / f"video-{index}{source_path.suffix or '.mp4'}"
+        target_path = ready_dir / _ready_video_filename(
+            validated.title,
+            index=index,
+            total=len(video_outputs),
+            suffix=source_path.suffix,
+        )
         shutil.copy2(source_path, target_path)
         copied_videos.append(str(target_path))
 

@@ -96,3 +96,27 @@ def test_source_content_hash_uses_content_before_title():
     )
 
     assert automation.source_content_hash(first) == automation.source_content_hash(second)
+
+
+def test_ready_video_filename_uses_title_for_single_video():
+    assert (
+        automation._ready_video_filename(
+            "印尼女子利用盲人乞讨被捕，收入揭露",
+            index=1,
+            total=1,
+            suffix=".mp4",
+        )
+        == "印尼女子利用盲人乞讨被捕-收入揭露.mp4"
+    )
+
+
+def test_ready_video_filename_adds_index_for_multiple_videos():
+    assert (
+        automation._ready_video_filename(
+            "News Title",
+            index=2,
+            total=3,
+            suffix=".mp4",
+        )
+        == "News-Title-2.mp4"
+    )
