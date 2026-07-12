@@ -120,3 +120,51 @@ def test_ready_video_filename_adds_index_for_multiple_videos():
         )
         == "News-Title-2.mp4"
     )
+
+
+def test_build_video_params_uses_app_cover_provider_when_automation_empty(monkeypatch):
+    monkeypatch.setitem(automation.config.app, "cover_generation_provider", "openrouter")
+    monkeypatch.setitem(
+        automation.config._cfg,
+        "automation",
+        {"automation_cover_generation_provider": ""},
+    )
+    validated = automation.ValidatedSource(
+        source=content_source.SourceContent(
+            source_type="article",
+            source_url="https://example.com/a",
+            final_url="https://example.com/a",
+            title="Source title",
+            content="Article content",
+            extraction_method="article",
+        ),
+        title="Video title",
+    )
+
+    params = automation._build_video_params(validated)
+
+    assert params.cover_generation_provider == "openrouter"
+
+
+def test_build_video_params_allows_automation_cover_provider_override(monkeypatch):
+    monkeypatch.setitem(automation.config.app, "cover_generation_provider", "openrouter")
+    monkeypatch.setitem(
+        automation.config._cfg,
+        "automation",
+        {"automation_cover_generation_provider": "local"},
+    )
+    validated = automation.ValidatedSource(
+        source=content_source.SourceContent(
+            source_type="article",
+            source_url="https://example.com/a",
+            final_url="https://example.com/a",
+            title="Source title",
+            content="Article content",
+            extraction_method="article",
+        ),
+        title="Video title",
+    )
+
+    params = automation._build_video_params(validated)
+
+    assert params.cover_generation_provider == "local"

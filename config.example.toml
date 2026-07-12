@@ -423,7 +423,8 @@ automation_video_count = 1
 automation_n_threads = 2
 automation_match_materials_to_script = true
 automation_generate_video_cover = true
-automation_cover_generation_provider = "local"
+# Leave empty to follow [app].cover_generation_provider.
+automation_cover_generation_provider = ""
 automation_paragraph_number = 1
 automation_video_script_prompt = "Create a concise news-style short video script. Stay factual, avoid sensationalism, and do not add unsupported details."
 automation_custom_system_prompt = ""

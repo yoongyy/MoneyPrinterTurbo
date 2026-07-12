@@ -826,6 +826,14 @@ Content preview:
 
 
 def _build_video_params(validated: ValidatedSource) -> VideoParams:
+    automation_cover_provider = str(
+        _automation_config_value("automation_cover_generation_provider", "") or ""
+    ).strip()
+    cover_generation_provider = (
+        automation_cover_provider
+        or str(config.app.get("cover_generation_provider", "") or "").strip()
+        or "local"
+    )
     params_data: dict[str, Any] = {
         "video_subject": validated.title,
         "source_type": validated.source.source_type,
@@ -892,13 +900,7 @@ def _build_video_params(validated: ValidatedSource) -> VideoParams:
         "n_threads": _config_int("automation_n_threads", 2),
         "match_materials_to_script": _config_bool("automation_match_materials_to_script", True),
         "generate_video_cover": _config_bool("automation_generate_video_cover", True),
-        "cover_generation_provider": str(
-            _automation_config_value(
-                "automation_cover_generation_provider",
-                config.app.get("cover_generation_provider", "local"),
-            )
-            or "local"
-        ),
+        "cover_generation_provider": cover_generation_provider,
         "paragraph_number": _config_int("automation_paragraph_number", 1),
         "video_script_prompt": str(_automation_config_value("automation_video_script_prompt", "") or ""),
         "custom_system_prompt": str(_automation_config_value("automation_custom_system_prompt", "") or ""),
