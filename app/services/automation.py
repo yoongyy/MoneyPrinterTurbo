@@ -935,11 +935,10 @@ def _slugify(value: str, max_length: int = 80) -> str:
     return value[:max_length].strip(".-") or "video"
 
 
-def _ready_video_filename(title: str, index: int, total: int, suffix: str) -> str:
-    stem = _slugify(title)
-    sequence = f"-{index}" if total > 1 else ""
-    extension = suffix if suffix else ".mp4"
-    return f"{stem}{sequence}{extension}"
+def _ready_video_filename(title: str, index: int, total: int) -> str:
+    # Keep the automation export naming aligned with the web video export path.
+    # The task layer already sanitizes the subject title safely for filesystem use.
+    return task_service.subject_video_filename(title, index=index, total=total)
 
 
 def _copy_outputs_to_ready_dir(
@@ -965,7 +964,6 @@ def _copy_outputs_to_ready_dir(
             validated.title,
             index=index,
             total=len(video_outputs),
-            suffix=source_path.suffix,
         )
         shutil.copy2(source_path, target_path)
         copied_videos.append(str(target_path))
